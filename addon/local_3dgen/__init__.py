@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Local 3D Gen (Hunyuan3D / TRELLIS)",
     "author": "Stun0perator",
-    "version": (1, 2, 0),
+    "version": (1, 3, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Sidebar (N) > Image to 3D",
-    "description": "Drop images in, get 3D models out: runs Hunyuan3D-2.1 or TRELLIS locally on your GPU",
+    "description": "Drop images in, get 3D models out (Hunyuan3D / TRELLIS, locally), then split into AMS colours",
     "doc_url": "https://huggingface.co/tencent/Hunyuan3D-2.1",
     "category": "3D View",
 }
@@ -13,6 +13,7 @@ import atexit, json, os, queue, random, subprocess, threading, time
 
 import bpy
 import bpy.utils.previews
+from . import ams
 from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty,
                        PointerProperty, StringProperty)
 
@@ -301,7 +302,7 @@ def _import_result(glb, job):
 def _model_opts(p):
     if p.model in ('hunyuan', 'hunyuan_mv'):
         return dict(steps=p.hy_steps, guidance=p.hy_guidance, res=int(p.hy_res))
-    return dict(steps=p.tr_steps, guidance=p.tr_guidance)
+    return dict(steps=p.tr_steps, guidance=p.tr_guidance, color_source=p.tr_colors)
 
 
 def queue_multiview(context, views):
@@ -427,6 +428,9 @@ class L3D_Props(bpy.types.PropertyGroup):
     tr_steps: IntProperty(name="Steps", default=12, min=4, max=50, description="Per stage (structure, detail)")
     tr_guidance: FloatProperty(name="Guidance", default=7.5, min=1.0, max=15.0,
                                description="How strictly the overall shape follows the image")
+    tr_colors: EnumProperty(name="Colours", default='photo', items=[
+        ('photo', "From photo", "Project the photo(s) onto the model; unseen sides mirror the photo"),
+        ('model', "TRELLIS's own", "Colours TRELLIS generates itself: covers every side, may invent")])
     # common
     seed: IntProperty(name="Seed", default=1234, min=0)
     random_seed: BoolProperty(name="Random", default=True, description="New random seed each run")
@@ -718,6 +722,7 @@ class L3D_PT_panel(bpy.types.Panel):
         else:
             col.prop(p, "tr_steps")
             col.prop(p, "tr_guidance")
+            col.prop(p, "tr_colors")
         row = box.row(align=True)
         sub = row.row(align=True)
         sub.enabled = not p.random_seed
@@ -783,6 +788,7 @@ def register():
     for c in classes:
         bpy.utils.register_class(c)
     bpy.types.Scene.l3d = PointerProperty(type=L3D_Props)
+    ams.register()
 
 
 def unregister():
@@ -790,6 +796,7 @@ def unregister():
     Engine.stop(hard=True)
     if bpy.app.timers.is_registered(_tick):
         bpy.app.timers.unregister(_tick)
+    ams.unregister()
     del bpy.types.Scene.l3d
     for c in reversed(classes):
         bpy.utils.unregister_class(c)

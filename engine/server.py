@@ -7,6 +7,8 @@ Protocol: one JSON request per line on stdin, one "@@" + JSON event per line on 
   in : {"cmd": "generate", "id": ..., "image": path  OR  "views": {"front": path, "left": path, ...},
         "out": dir, "name": str, "seed": int, "remove_bg": bool, ...backend options (see backends/*.py)}
        View names: front, left, back, right. Multi-view needs a backend with multiview = True.
+       "colors": true (default) puts vertex colours on the mesh; "color_source": "photo" (default,
+       project the input photos) or "model" (the model's own colours, TRELLIS only).
        {"cmd": "quit"}
   out: {"ev": "status", "msg": str, "ready": bool?}
        {"ev": "progress", "id": ..., "stage": str, "frac": 0..1}
@@ -100,7 +102,18 @@ def main():
         base = os.path.join(job['out'], f"{job.get('name', 'model')}_{a.backend}_s{job['seed']}")
         for view, img in views.items():
             img.save(f'{base}_input_{view}.png')
-        mesh = backend.generate(views, job, lambda stage, frac: emit(ev='progress', id=jid, stage=stage, frac=frac))
+        progress = lambda stage, frac: emit(ev='progress', id=jid, stage=stage, frac=frac)
+        mesh = backend.generate(views, job, progress)
+        if job.get('colors', True):
+            import numpy as np
+            import colorize
+            colors = mesh.metadata.pop('l3d_colors', None)
+            if colors is None:  # no colours from the model: project the photo(s) onto the mesh
+                progress('colouring', 1.0)
+                alpha = np.asarray(views.get('front', next(iter(views.values()))))[..., 3] / 255.0
+                front, _ = colorize.find_front(np.asarray(mesh.vertices), alpha, prefer='+z')
+                colors, _ = colorize.project(mesh, views, front)
+            colorize.attach(mesh, colors)
         emit(ev='progress', id=jid, stage='saving', frac=1.0)
         mesh.export(base + '.glb')
         emit(ev='done', id=jid, glb=base + '.glb', verts=len(mesh.vertices), faces=len(mesh.faces),

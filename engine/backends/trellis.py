@@ -50,7 +50,9 @@ class Backend:
         import trimesh
         steps = int(job.get('steps', 12))
         self._track(progress, ['shaping (structure)', 'shaping (detail)'])
-        params = dict(seed=int(job['seed']), formats=['mesh'],
+        # the model's own colours, only when asked for (default is projecting the photos, done by the server)
+        want_colors = job.get('colors', True) and job.get('color_source', 'photo') == 'model'
+        params = dict(seed=int(job['seed']), formats=['mesh', 'gaussian'] if want_colors else ['mesh'],
                       sparse_structure_sampler_params={'steps': steps, 'cfg_strength': float(job.get('guidance', 7.5))},
                       slat_sampler_params={'steps': steps, 'cfg_strength': 3.0})
         images = list(views.values())
@@ -61,7 +63,8 @@ class Backend:
         m = out['mesh'][0]
         v = m.vertices.detach().float().cpu().numpy()
         f = m.faces.detach().cpu().numpy()
-        v = v @ np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], dtype=np.float32)  # Z-up -> glTF Y-up
+        to_gltf = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], dtype=np.float32)  # Z-up -> glTF Y-up
+        v = v @ to_gltf
         progress('cleaning up', 1.0)
         mesh = trimesh.Trimesh(v, f, process=True)
         mesh.remove_unreferenced_vertices()
@@ -70,4 +73,13 @@ class Backend:
             keep = [p for p in parts if len(p.faces) >= 0.01 * len(mesh.faces)]
             mesh = trimesh.util.concatenate(keep)
         trimesh.repair.fix_normals(mesh)
+        if want_colors:
+            # TRELLIS colours live in its gaussians (same space as the mesh): copy them to the vertices
+            import colorize
+            progress('colouring', 1.0)
+            g = out['gaussian'][0]
+            pts = g.get_xyz.detach().float().cpu().numpy() @ to_gltf
+            rgb = np.clip(g._features_dc.detach().float().cpu().numpy()[:, 0, :3] * 0.28209479177387814 + 0.5, 0, 1)
+            opacity = g.get_opacity.detach().float().cpu().numpy().reshape(-1)
+            mesh.metadata['l3d_colors'] = colorize.transfer(np.asarray(mesh.vertices), pts, rgb, weights=opacity)
         return mesh
