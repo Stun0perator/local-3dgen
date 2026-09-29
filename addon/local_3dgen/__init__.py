@@ -1,6 +1,6 @@
 bl_info = {
     "name": "Local 3D Gen (Hunyuan3D / TRELLIS)",
-    "author": "eag4k",
+    "author": "Stun0perator",
     "version": (1, 1, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Sidebar (N) > Image to 3D",

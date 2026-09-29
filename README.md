@@ -98,3 +98,8 @@ The engine watches Blender's process ID and exits when Blender is gone.
 Built on [Hunyuan3D 2.1](https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1) by Tencent and
 [TRELLIS](https://github.com/microsoft/TRELLIS) by Microsoft. Generated models are subject to each model's
 licence.
+
+## Licence
+
+The code in this repo is [MIT](LICENSE). The models are not covered by it: they come under their own
+licences (see [The models](#the-models)), and so do the meshes you generate with them.
