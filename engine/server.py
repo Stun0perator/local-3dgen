@@ -4,8 +4,9 @@ Run with the Python of the chosen model's own environment:
     <model_dir>/.venv/Scripts/python.exe engine/server.py --backend hunyuan --model-dir <model_dir>
 
 Protocol: one JSON request per line on stdin, one "@@" + JSON event per line on stdout.
-  in : {"cmd": "generate", "id": ..., "image": path, "out": dir, "name": str, "seed": int,
-        "remove_bg": bool, ...backend options (see backends/*.py)}
+  in : {"cmd": "generate", "id": ..., "image": path  OR  "views": {"front": path, "left": path, ...},
+        "out": dir, "name": str, "seed": int, "remove_bg": bool, ...backend options (see backends/*.py)}
+       View names: front, left, back, right. Multi-view needs a backend with multiview = True.
        {"cmd": "quit"}
   out: {"ev": "status", "msg": str, "ready": bool?}
        {"ev": "progress", "id": ..., "stage": str, "frac": 0..1}
@@ -47,7 +48,7 @@ def watch_parent(pid):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--backend', required=True, choices=['hunyuan', 'trellis'])
+    ap.add_argument('--backend', required=True, choices=['hunyuan', 'hunyuan_mv', 'trellis'])
     ap.add_argument('--model-dir', required=True, help='clone of the model repo (with its .venv)')
     ap.add_argument('--parent-pid', type=int, default=0)
     a = ap.parse_args()
@@ -58,6 +59,8 @@ def main():
     emit(ev='status', msg='Loading libraries…')
     if a.backend == 'hunyuan':
         from backends.hunyuan import Backend
+    elif a.backend == 'hunyuan_mv':
+        from backends.hunyuan_mv import Backend
     else:
         from backends.trellis import Backend
     import torch
@@ -70,9 +73,9 @@ def main():
 
     rembg_session = None
 
-    def prepare(job):
+    def cut_out(path, job):
         nonlocal rembg_session
-        img = Image.open(job['image'])
+        img = Image.open(path)
         img.load()
         has_alpha = img.mode in ('RGBA', 'LA') and img.getchannel('A').getextrema()[0] < 255
         if has_alpha or not job.get('remove_bg', True):
@@ -82,14 +85,22 @@ def main():
         rembg_session = rembg_session or new_session('u2net')
         return remove(img.convert('RGB'), session=rembg_session)
 
+    def prepare(job):
+        """-> {view name: RGBA image}; a single image counts as the front view."""
+        paths = job.get('views') or {'front': job['image']}
+        if len(paths) > 1 and not backend.multiview:
+            raise ValueError(f'{backend.label} takes one image; use a multi-view model for several angles')
+        return {view: cut_out(path, job) for view, path in paths.items()}
+
     def generate(job):
         jid = job.get('id')
         t = time.time()
-        img = prepare(job)
+        views = prepare(job)
         os.makedirs(job['out'], exist_ok=True)
         base = os.path.join(job['out'], f"{job.get('name', 'model')}_{a.backend}_s{job['seed']}")
-        img.save(base + '_input.png')
-        mesh = backend.generate(img, job, lambda stage, frac: emit(ev='progress', id=jid, stage=stage, frac=frac))
+        for view, img in views.items():
+            img.save(f'{base}_input_{view}.png')
+        mesh = backend.generate(views, job, lambda stage, frac: emit(ev='progress', id=jid, stage=stage, frac=frac))
         emit(ev='progress', id=jid, stage='saving', frac=1.0)
         mesh.export(base + '.glb')
         emit(ev='done', id=jid, glb=base + '.glb', verts=len(mesh.vertices), faces=len(mesh.faces),

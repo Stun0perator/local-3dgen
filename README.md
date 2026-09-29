@@ -3,9 +3,11 @@
 Drag images into Blender and get 3D models back, generated **locally on your own GPU** with open
 image-to-3D models. No API keys, no cloud, no per-model fees.
 
-- **Two models, one switch:** [Hunyuan3D 2.1](https://huggingface.co/tencent/Hunyuan3D-2.1) (Tencent) and
+- **Three models, one switch:** [Hunyuan3D 2.1](https://huggingface.co/tencent/Hunyuan3D-2.1) and
+  [Hunyuan3D 2mv](https://huggingface.co/tencent/Hunyuan3D-2mv) (Tencent), and
   [TRELLIS](https://huggingface.co/microsoft/TRELLIS-image-large) (Microsoft).
 - **Drag and drop:** drop one or more image files onto the *Image to 3D* sidebar tab; each becomes a model.
+- **Multi-view:** give several photos of one object (front, left, back, right) for a more accurate model.
 - **Stays loaded:** the model loads once per session (the first load takes a few minutes), then each model
   takes about a minute. Blender stays responsive while it works.
 - **Cleans up after itself:** the engine exits when Blender closes, including if Blender crashes, so it never
@@ -21,7 +23,14 @@ licences before you do:
 | Model | Weights | Code | Licence | GPU memory |
 |---|---|---|---|---|
 | Hunyuan3D 2.1 (shape) | [tencent/Hunyuan3D-2.1](https://huggingface.co/tencent/Hunyuan3D-2.1) | [Tencent-Hunyuan/Hunyuan3D-2.1](https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1) | [Tencent Hunyuan 3D 2.1 Community License](https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1/blob/main/LICENSE): not licensed in the EU, UK or South Korea | ~10 GB |
+| Hunyuan3D 2mv (multi-view shape) | [tencent/Hunyuan3D-2mv](https://huggingface.co/tencent/Hunyuan3D-2mv) | [Tencent-Hunyuan/Hunyuan3D-2](https://github.com/Tencent-Hunyuan/Hunyuan3D-2) | [Tencent Hunyuan 3D 2.0 Community License](https://github.com/Tencent-Hunyuan/Hunyuan3D-2/blob/main/LICENSE): not licensed in the EU, UK or South Korea | ~10 GB |
 | TRELLIS image-large | [microsoft/TRELLIS-image-large](https://huggingface.co/microsoft/TRELLIS-image-large) | [microsoft/TRELLIS](https://github.com/microsoft/TRELLIS) | [MIT](https://github.com/microsoft/TRELLIS/blob/main/LICENSE) | ~8 GB |
+
+Which one to use:
+- **Hunyuan 2.1:** the sharpest detail from a single image, about 80 s per model.
+- **Hunyuan 2mv:** takes labelled views (front, left, back, right), about 60 s. It's the most accurate when
+  you have photos from several sides.
+- **TRELLIS:** very fast (about 10 s), and takes one image or several views from any angles.
 
 Downloaded automatically as dependencies:
 - [DINOv2](https://github.com/facebookresearch/dinov2), used by TRELLIS.
@@ -35,14 +44,15 @@ TRELLIS.2 is not supported: it currently needs Linux and 24 GB or more of GPU me
 - NVIDIA GPU, 12 GB+ memory recommended (tested on an RTX 5070 Ti 16 GB)
 - [Blender](https://www.blender.org/) 4.2 or newer (tested on 5.1)
 - [git](https://git-scm.com/) and [uv](https://docs.astral.sh/uv/)
-- About 30 GB of disk: two Python environments plus model weights
+- About 45 GB of disk for all three models: one Python environment per model, plus the weights
 
 ## Setup
 
-1. Install one or both models. Each gets its own folder and Python environment:
+1. Install any of the models. Each gets its own folder and Python environment:
    ```powershell
-   powershell -ExecutionPolicy Bypass -File setup\setup_hunyuan.ps1   # -> %USERPROFILE%\Hunyuan3D
-   powershell -ExecutionPolicy Bypass -File setup\setup_trellis.ps1   # -> %USERPROFILE%\TRELLIS
+   powershell -ExecutionPolicy Bypass -File setup\setup_hunyuan.ps1      # -> %USERPROFILE%\Hunyuan3D
+   powershell -ExecutionPolicy Bypass -File setup\setup_hunyuan_mv.ps1   # -> %USERPROFILE%\Hunyuan3D-2
+   powershell -ExecutionPolicy Bypass -File setup\setup_trellis.ps1      # -> %USERPROFILE%\TRELLIS
    ```
    Pass `-Dir D:\somewhere` to install elsewhere.
 2. Install the Blender add-on. Pick one option:
@@ -56,16 +66,21 @@ TRELLIS.2 is not supported: it currently needs Linux and 24 GB or more of GPU me
 ## Using it
 
 1. In the 3D Viewport press **N** and open the **Image to 3D** tab.
-2. Pick **Hunyuan3D 2.1** or **TRELLIS** at the top.
+2. Pick a model at the top: **Hunyuan 2.1**, **Hunyuan 2mv** or **TRELLIS**.
 3. **Drop image files onto the panel** (or use **+**). With *Generate on drop* on, they start straight away.
    Otherwise select one and press **Generate**, or press **All**.
+   For **multi-view**, switch the mode to *Multi-view (one object)*. Drop photos of the same object taken from
+   different sides, and check each one's view (front, left, back or right). They're filled in automatically in
+   the order you drop them. Then press **Generate from N views**. This needs Hunyuan 2mv or TRELLIS.
 4. Models appear at the 3D cursor in an **AI Meshes** collection, scaled so the longest side matches
    *Longest side (mm)*. Variants are laid out side by side.
 
 Tips:
 - Use a clean, single-object image with a plain background. The background is removed automatically.
 - Try a few seeds (*Variants* 3–4) and keep the best one.
-- Hunyuan: raise *Detail* to 512 for finer surfaces. It takes more time and GPU memory.
+- Hunyuan: *Detail* 512 gives finer surfaces, but the final "building mesh" step runs on the CPU and can take
+  several minutes with a lot of RAM. 384 with 50 steps is the sweet spot.
+- Multi-view photos: same object, lighting and distance, roughly 90° apart, plain background.
 - Switching models, or pressing ✕, unloads the current model to free GPU memory.
 - Each result is also saved as a GLB in `outputs/<image name>/`, next to the cut-out input image.
 
@@ -74,6 +89,7 @@ Tips:
 The same engine works from a terminal:
 ```
 python scripts/img2mesh.py photo.png --model trellis --variants 3
+python scripts/img2mesh.py --model hunyuan_mv --views front=f.png left=l.png back=b.png
 ```
 
 ## How it works
@@ -81,21 +97,23 @@ python scripts/img2mesh.py photo.png --model trellis --variants 3
 ```
 Blender add-on (addon/local_3dgen)
    └─ starts engine/server.py with the chosen model's own .venv Python
-        ├─ backends/hunyuan.py  → hy3dshape pipeline
-        └─ backends/trellis.py  → TRELLIS pipeline (+ shims for xformers / kaolin)
+        ├─ backends/hunyuan.py     → Hunyuan3D-2.1 (hy3dshape)
+        ├─ backends/hunyuan_mv.py  → Hunyuan3D-2mv (hy3dgen)
+        └─ backends/trellis.py     → TRELLIS, single or multi-image (+ shims for xformers / kaolin)
    JSON lines over stdin/stdout: generate requests in; progress, done and error events out
 ```
 The engine watches Blender's process ID and exits when Blender is gone.
 
 ## Troubleshooting
 
-- **The engine stops right away:** read `engine_hunyuan.log` or `engine_trellis.log` in the repo folder.
+- **The engine stops right away:** read `engine_<model>.log` in the repo folder.
 - **"Out of GPU memory":** close other GPU apps, lower *Detail*, or switch models.
 - **The first run seems stuck at "Loading model":** it's downloading several GB of weights; later loads are faster.
 
 ## Credits
 
-Built on [Hunyuan3D 2.1](https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1) by Tencent and
+Built on [Hunyuan3D 2.1](https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1) and
+[Hunyuan3D 2](https://github.com/Tencent-Hunyuan/Hunyuan3D-2) by Tencent, and
 [TRELLIS](https://github.com/microsoft/TRELLIS) by Microsoft. Generated models are subject to each model's
 licence.
 

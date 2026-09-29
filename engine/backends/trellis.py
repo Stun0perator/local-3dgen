@@ -1,6 +1,7 @@
 """Microsoft TRELLIS image-to-3D (https://huggingface.co/microsoft/TRELLIS-image-large).
 
 Job options: steps (12, used for both stages), guidance (7.5 structure; detail stage uses 3.0).
+Several views: TRELLIS's tuning-free multi-image mode (the view names are ignored, order doesn't matter).
 Runs without xformers/flash-attn: attention goes through torch SDPA (see ../shims),
 which is what makes it work on RTX 50-series cards under Windows.
 """
@@ -13,6 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 class Backend:
     label = 'TRELLIS (image-large)'
+    multiview = True
 
     def __init__(self, model_dir):
         os.environ.setdefault('ATTN_BACKEND', 'sdpa')
@@ -43,16 +45,19 @@ class Backend:
 
         self.flow_euler.tqdm = tqdm
 
-    def generate(self, img, job, progress):
+    def generate(self, views, job, progress):
         import numpy as np
         import trimesh
         steps = int(job.get('steps', 12))
         self._track(progress, ['shaping (structure)', 'shaping (detail)'])
-        out = self.pipe.run(
-            img, seed=int(job['seed']), formats=['mesh'],
-            sparse_structure_sampler_params={'steps': steps, 'cfg_strength': float(job.get('guidance', 7.5))},
-            slat_sampler_params={'steps': steps, 'cfg_strength': 3.0},
-        )
+        params = dict(seed=int(job['seed']), formats=['mesh'],
+                      sparse_structure_sampler_params={'steps': steps, 'cfg_strength': float(job.get('guidance', 7.5))},
+                      slat_sampler_params={'steps': steps, 'cfg_strength': 3.0})
+        images = list(views.values())
+        if len(images) == 1:
+            out = self.pipe.run(images[0], **params)
+        else:
+            out = self.pipe.run_multi_image(images, mode='stochastic', **params)
         m = out['mesh'][0]
         v = m.vertices.detach().float().cpu().numpy()
         f = m.faces.detach().cpu().numpy()

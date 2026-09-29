@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Local 3D Gen (Hunyuan3D / TRELLIS)",
     "author": "Stun0perator",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Sidebar (N) > Image to 3D",
     "description": "Drop images in, get 3D models out: runs Hunyuan3D-2.1 or TRELLIS locally on your GPU",
@@ -24,14 +24,24 @@ MODELS = {
         weights="https://huggingface.co/tencent/Hunyuan3D-2.1",
         code="https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1",
         license="Tencent Hunyuan 3D 2.1 Community License (not valid in the EU, UK, South Korea)",
-        about="Sharper detail, closer to the image. ~10 GB GPU memory, ~80 s per model"),
+        about="Sharper detail, closer to the image. One image only. ~10 GB GPU memory, ~80 s per model",
+        multiview=False, pref="hunyuan_dir"),
+    'hunyuan_mv': dict(
+        label="Hunyuan3D 2mv",
+        weights="https://huggingface.co/tencent/Hunyuan3D-2mv",
+        code="https://github.com/Tencent-Hunyuan/Hunyuan3D-2",
+        license="Tencent Hunyuan 3D 2.0 Community License (not valid in the EU, UK, South Korea)",
+        about="Built for several labelled views (front/left/back/right). ~10 GB GPU memory, ~60 s per model",
+        multiview=True, pref="hunyuan_mv_dir"),
     'trellis': dict(
         label="TRELLIS",
         weights="https://huggingface.co/microsoft/TRELLIS-image-large",
         code="https://github.com/microsoft/TRELLIS",
         license="MIT",
-        about="Different look, often cleaner overall form. ~8 GB GPU memory"),
+        about="Fast (~10 s). Accepts several views of any angle. ~8 GB GPU memory",
+        multiview=True, pref="trellis_dir"),
 }
+VIEWS = [('front', "Front", ""), ('left', "Left", ""), ('back', "Back", ""), ('right', "Right", "")]
 
 _previews = None
 
@@ -70,6 +80,8 @@ class Engine:
     last_error = ""
     results = []          # (object name, info text)
     started_at = 0.0
+    stage_at = 0.0        # when the current stage started
+    last_event = 0.0      # last engine event, to spot a job that stopped reporting
     log = None
 
     @classmethod
@@ -84,7 +96,7 @@ class Engine:
             cls.stop(keep_queue=True)
         pr = _prefs()
         repo = _p(pr.repo_dir)
-        model_dir = _p(pr.hunyuan_dir if backend == 'hunyuan' else pr.trellis_dir)
+        model_dir = _p(getattr(pr, MODELS[backend]["pref"]))
         py = os.path.join(model_dir, ".venv", "Scripts", "python.exe")
         if not os.path.exists(py):
             py = os.path.join(model_dir, ".venv", "bin", "python")
@@ -166,9 +178,10 @@ def _ensure_timer():
 
 def _set_item_status(job, text):
     scene = bpy.data.scenes.get(job["ctx"]["scene"])
+    paths = set(job["req"].get("views", {}).values()) or {job["req"].get("image")}
     if scene:
         for it in scene.l3d.images:
-            if _p(it.path) == job["req"]["image"]:
+            if _p(it.path) in paths:
                 it.status = text
 
 
@@ -183,11 +196,14 @@ def _tick():
         if ev.get("_proc") is not Engine.proc:
             continue  # stale event from an engine we already stopped
         changed = True
+        Engine.last_event = time.time()
         kind = ev.get("ev")
         if kind == "status":
             Engine.status = ev["msg"]
             Engine.ready = bool(ev.get("ready")) or Engine.ready
         elif kind == "progress":
+            if ev["stage"] != Engine.stage:
+                Engine.stage_at = time.time()
             Engine.stage, Engine.frac = ev["stage"], ev["frac"]
         elif kind == "done":
             job, Engine.current = Engine.current, None
@@ -227,11 +243,12 @@ def _tick():
         elif Engine.ready:
             Engine.current = Engine.pending.pop(0)
             Engine.stage, Engine.frac = "starting", 0.0
+            Engine.stage_at = Engine.last_event = time.time()
             _set_item_status(Engine.current, "generating")
             Engine.send(Engine.current["req"])
             changed = True
-    if Engine.alive() and not Engine.ready:
-        changed = True  # keep the loading timer moving
+    if Engine.alive() and (not Engine.ready or Engine.current is not None):
+        changed = True  # keep the timers moving
 
     if changed:
         _redraw()
@@ -270,7 +287,7 @@ def _import_result(glb, job):
     ob.name = ob.data.name = f'{job["name"]}_{job["backend"]}_s{job["seed"]}'
     ob["l3d_model"] = MODELS[job["backend"]]["label"]
     ob["l3d_seed"] = job["seed"]
-    ob["l3d_image"] = job["req"]["image"]
+    ob["l3d_images"] = json.dumps(job["req"].get("views") or {"front": job["req"]["image"]})
     ob["l3d_glb"] = glb
     coll = bpy.data.collections.get("AI Meshes") or bpy.data.collections.new("AI Meshes")
     if coll.name not in scene.collection.children:
@@ -279,6 +296,39 @@ def _import_result(glb, job):
         c.objects.unlink(ob)
     coll.objects.link(ob)
     return ob.name
+
+
+def _model_opts(p):
+    if p.model in ('hunyuan', 'hunyuan_mv'):
+        return dict(steps=p.hy_steps, guidance=p.hy_guidance, res=int(p.hy_res))
+    return dict(steps=p.tr_steps, guidance=p.tr_guidance)
+
+
+def queue_multiview(context, views):
+    """Queue one job (x variants) that uses several views of the same object: {view: path}."""
+    p = context.scene.l3d
+    pr = _prefs()
+    unit = context.scene.unit_settings.scale_length or 1.0
+    out_root = _p(pr.output_dir) or os.path.join(_p(pr.repo_dir), "outputs")
+    first = views.get('front') or next(iter(views.values()))
+    name = bpy.path.clean_name(os.path.splitext(os.path.basename(first))[0]) + "_mv"
+    if Engine.current is None and not Engine.pending:
+        Engine.batch_total = Engine.batch_done = 0
+    Engine.last_error = ""
+    base_seed = random.randint(0, 2**31 - 1) if p.random_seed else p.seed
+    for i in range(p.variants):
+        seed = base_seed + i
+        ctx = dict(scene=context.scene.name, cursor=tuple(context.scene.cursor.location),
+                   size_bu=p.size_mm / 1000.0 / unit, smooth=p.smooth)
+        Engine.pending.append(dict(
+            backend=p.model, name=name, seed=seed, slot=i, ctx=ctx,
+            req=dict(cmd="generate", id=f"{name}-{seed}", views=views, out=os.path.join(out_root, name),
+                     name=name, seed=seed, remove_bg=p.remove_bg, **_model_opts(p))))
+        Engine.batch_total += 1
+    if p.random_seed:
+        p.seed = base_seed
+    _set_item_status(Engine.pending[-1], "queued")
+    _ensure_timer()
 
 
 def queue_images(context, paths):
@@ -297,10 +347,7 @@ def queue_images(context, paths):
         base_seed = random.randint(0, 2**31 - 1) if p.random_seed else p.seed
         for i in range(p.variants):
             seed = base_seed + i
-            if backend == 'hunyuan':
-                opts = dict(steps=p.hy_steps, guidance=p.hy_guidance, res=int(p.hy_res))
-            else:
-                opts = dict(steps=p.tr_steps, guidance=p.tr_guidance)
+            opts = _model_opts(p)
             ctx = dict(scene=context.scene.name, cursor=tuple(context.scene.cursor.location),
                        size_bu=p.size_mm / 1000.0 / unit, smooth=p.smooth)
             Engine.pending.append(dict(
@@ -324,6 +371,9 @@ class L3D_Prefs(bpy.types.AddonPreferences):
     hunyuan_dir: StringProperty(name="Hunyuan3D-2.1 folder", subtype='DIR_PATH',
                                 default=os.path.expanduser(r"~\Hunyuan3D"),
                                 description="Clone of Tencent-Hunyuan/Hunyuan3D-2.1 with its .venv")
+    hunyuan_mv_dir: StringProperty(name="Hunyuan3D-2 (2mv) folder", subtype='DIR_PATH',
+                                   default=os.path.expanduser(r"~\Hunyuan3D-2"),
+                                   description="Clone of Tencent-Hunyuan/Hunyuan3D-2 with its .venv")
     trellis_dir: StringProperty(name="TRELLIS folder", subtype='DIR_PATH',
                                 default=os.path.expanduser(r"~\TRELLIS"),
                                 description="Clone of microsoft/TRELLIS with its .venv")
@@ -334,6 +384,7 @@ class L3D_Prefs(bpy.types.AddonPreferences):
         L = self.layout
         L.prop(self, "repo_dir")
         L.prop(self, "hunyuan_dir")
+        L.prop(self, "hunyuan_mv_dir")
         L.prop(self, "trellis_dir")
         L.prop(self, "output_dir")
         box = L.box()
@@ -348,12 +399,18 @@ class L3D_Prefs(bpy.types.AddonPreferences):
 class L3D_Image(bpy.types.PropertyGroup):
     path: StringProperty(name="Path", subtype='FILE_PATH')
     status: StringProperty(default="")
+    view: EnumProperty(name="View", items=VIEWS, default='front',
+                       description="Which side of the object this photo shows (multi-view mode)")
 
 
 class L3D_Props(bpy.types.PropertyGroup):
     model: EnumProperty(name="Model", default='hunyuan', items=[
-        ('hunyuan', "Hunyuan3D 2.1", MODELS['hunyuan']['about']),
+        ('hunyuan', "Hunyuan 2.1", MODELS['hunyuan']['about']),
+        ('hunyuan_mv', "Hunyuan 2mv", MODELS['hunyuan_mv']['about']),
         ('trellis', "TRELLIS", MODELS['trellis']['about'])])
+    mode: EnumProperty(name="Mode", default='single', items=[
+        ('single', "One model per image", "Each image becomes its own model"),
+        ('multi', "Multi-view (one object)", "All images are different angles of the same object")])
     images: CollectionProperty(type=L3D_Image)
     active: IntProperty(default=0)
     auto_generate: BoolProperty(name="Generate on drop", default=True,
@@ -365,7 +422,7 @@ class L3D_Props(bpy.types.PropertyGroup):
                                description="How strictly to follow the image")
     hy_res: EnumProperty(name="Detail", default='384', items=[
         ('256', "Low (256)", "Fast, blobby"), ('384', "Normal (384)", "Default"),
-        ('512', "High (512)", "Finer detail, more GPU memory and time")])
+        ('512', "High (512)", "Finer detail; the final mesh build runs on the CPU and can take several minutes")])
     # TRELLIS
     tr_steps: IntProperty(name="Steps", default=12, min=4, max=50, description="Per stage (structure, detail)")
     tr_guidance: FloatProperty(name="Guidance", default=7.5, min=1.0, max=15.0,
@@ -417,11 +474,13 @@ class L3D_OT_add_images(bpy.types.Operator):
             if path in known:
                 p.active = known[path]
                 continue
+            used = {it.view for it in p.images}
             it = p.images.add()
             it.path = path
             it.name = os.path.basename(path)
+            it.view = next((v for v, _, _ in VIEWS if v not in used), 'front')
             p.active = len(p.images) - 1
-        if self.dropped and p.auto_generate:
+        if self.dropped and p.auto_generate and p.mode == 'single':
             queue_images(context, paths)
         return {'FINISHED'}
 
@@ -464,6 +523,25 @@ class L3D_OT_generate(bpy.types.Operator):
 
     def execute(self, context):
         p = context.scene.l3d
+        if p.mode == 'multi':
+            if not MODELS[p.model]["multiview"]:
+                self.report({'ERROR'}, f"{MODELS[p.model]['label']} takes one image: pick Hunyuan 2mv or TRELLIS")
+                return {'CANCELLED'}
+            views = {}
+            for it in p.images:
+                if it.view in views:
+                    self.report({'ERROR'}, f"Two images are set to '{it.view}'; give each a different view")
+                    return {'CANCELLED'}
+                if os.path.isfile(_p(it.path)):
+                    views[it.view] = _p(it.path)
+            if not views:
+                self.report({'ERROR'}, "Drop or add images first")
+                return {'CANCELLED'}
+            if p.model == 'hunyuan_mv' and 'front' not in views:
+                self.report({'ERROR'}, "Hunyuan 2mv needs a front view")
+                return {'CANCELLED'}
+            queue_multiview(context, views)
+            return {'FINISHED'}
         items = list(p.images) if self.all_images else ([p.images[p.active]] if 0 <= p.active < len(p.images) else [])
         paths = [_p(it.path) for it in items if os.path.isfile(_p(it.path))]
         if not paths:
@@ -561,6 +639,10 @@ def _icon(path):
 class L3D_UL_images(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_prop, index):
         row = layout.row(align=True)
+        if context.scene.l3d.mode == 'multi':
+            sub = row.row(align=True)
+            sub.ui_units_x = 3.2
+            sub.prop(item, "view", text="")
         row.label(text=item.name, icon_value=_icon(_p(item.path)) or 'IMAGE_DATA')
         if item.status:
             row.label(text=item.status)
@@ -599,9 +681,17 @@ class L3D_PT_panel(bpy.types.Panel):
 
         # images / drop zone
         box = L.box()
+        box.row(align=True).prop(p, "mode", expand=True)
         drop = box.row()
         drop.alignment = 'CENTER'
-        drop.label(text="Drop images onto this panel", icon='IMPORT')
+        if p.mode == 'multi':
+            drop.label(text="Drop photos of one object from different sides", icon='IMPORT')
+        else:
+            drop.label(text="Drop images onto this panel", icon='IMPORT')
+        if p.mode == 'multi' and not MODELS[p.model]["multiview"]:
+            warn = box.row()
+            warn.alert = True
+            warn.label(text="Hunyuan 2.1 takes one image: use Hunyuan 2mv or TRELLIS", icon='ERROR')
         row = box.row()
         row.template_list("L3D_UL_images", "", p, "images", p, "active", rows=3)
         col = row.column(align=True)
@@ -613,13 +703,15 @@ class L3D_PT_panel(bpy.types.Panel):
             if ic:
                 box.template_icon(icon_value=ic, scale=7)
         row = box.row()
-        row.prop(p, "auto_generate")
+        sub = row.row()
+        sub.enabled = p.mode == 'single'
+        sub.prop(p, "auto_generate")
         row.prop(p, "remove_bg")
 
         # settings
         box = L.box()
         col = box.column(align=True)
-        if p.model == 'hunyuan':
+        if p.model in ('hunyuan', 'hunyuan_mv'):
             col.prop(p, "hy_res")
             col.prop(p, "hy_steps")
             col.prop(p, "hy_guidance")
@@ -638,18 +730,32 @@ class L3D_PT_panel(bpy.types.Panel):
         # run
         row = L.row(align=True)
         row.scale_y = 1.6
-        row.operator("l3d.generate", text="Queue more" if busy else "Generate", icon='MESH_MONKEY').all_images = False
-        sub = row.row(align=True)
-        sub.enabled = len(p.images) > 1
-        sub.operator("l3d.generate", text="All").all_images = True
+        if p.mode == 'multi':
+            text = f"Generate from {len(p.images)} view{'s' if len(p.images) != 1 else ''}"
+            row.operator("l3d.generate", text="Queue more" if busy else text, icon='MESH_MONKEY').all_images = True
+        else:
+            row.operator("l3d.generate", text="Queue more" if busy else "Generate", icon='MESH_MONKEY').all_images = False
+            sub = row.row(align=True)
+            sub.enabled = len(p.images) > 1
+            sub.operator("l3d.generate", text="All").all_images = True
         if busy:
             row.operator("l3d.cancel", text="", icon='CANCEL')
             n = f"  {Engine.batch_done + 1}/{Engine.batch_total}" if Engine.batch_total > 1 else ""
             if Engine.current is None:
                 L.progress(factor=0.0, type='BAR', text=f"Loading model…{n}")
             else:
-                L.progress(factor=Engine.frac, type='BAR',
-                           text=f"{Engine.stage.capitalize()} {int(Engine.frac * 100)}%{n}")
+                secs = int(time.time() - Engine.stage_at)
+                if Engine.stage in ("building mesh", "cleaning up", "saving", "removing background", "starting"):
+                    text = f"{Engine.stage.capitalize()}... {secs}s{n}"   # no step count for these stages
+                else:
+                    text = f"{Engine.stage.capitalize()} {int(Engine.frac * 100)}%{n}"
+                L.progress(factor=Engine.frac, type='BAR', text=text)
+                quiet = time.time() - Engine.last_event
+                if quiet > 300:
+                    note = L.row()
+                    note.alert = True
+                    note.label(text=f"No progress for {int(quiet // 60)} min (High detail can be slow). X cancels",
+                               icon='INFO')
 
         if Engine.last_error:
             col = L.column()

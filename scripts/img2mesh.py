@@ -2,18 +2,22 @@
 
 Run with any Python 3.9+ (it starts the engine with the model's own environment):
     python scripts/img2mesh.py photo.png [more.png ...] --model trellis --model-dir C:/Users/me/TRELLIS
+    python scripts/img2mesh.py --model hunyuan_mv --views front=f.png left=l.png back=b.png   (one object)
 Options: --seed N, --variants N, --steps N, --guidance X, --res 256|384|512 (Hunyuan only), --out DIR
 """
 import argparse, json, os, random, subprocess, sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_DIRS = {'hunyuan': os.path.expanduser('~/Hunyuan3D'), 'trellis': os.path.expanduser('~/TRELLIS')}
+DEFAULT_DIRS = {'hunyuan': os.path.expanduser('~/Hunyuan3D'), 'hunyuan_mv': os.path.expanduser('~/Hunyuan3D-2'),
+                'trellis': os.path.expanduser('~/TRELLIS')}
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('images', nargs='+')
-    ap.add_argument('--model', choices=['hunyuan', 'trellis'], default='hunyuan')
+    ap.add_argument('images', nargs='*')
+    ap.add_argument('--views', nargs='+', metavar='VIEW=PATH',
+                    help='several photos of ONE object: front=, left=, back=, right= (hunyuan_mv or trellis)')
+    ap.add_argument('--model', choices=['hunyuan', 'hunyuan_mv', 'trellis'], default='hunyuan')
     ap.add_argument('--model-dir')
     ap.add_argument('--out', default=os.path.join(REPO, 'outputs'))
     ap.add_argument('--seed', type=int)
@@ -23,6 +27,8 @@ def main():
     ap.add_argument('--res', type=int, choices=[256, 384, 512])
     ap.add_argument('--keep-background', action='store_true')
     a = ap.parse_args()
+    if not a.images and not a.views:
+        ap.error('give image paths, or --views front=... left=...')
 
     model_dir = os.path.abspath(a.model_dir or DEFAULT_DIRS[a.model])
     py = os.path.join(model_dir, '.venv', 'Scripts', 'python.exe')
@@ -33,11 +39,16 @@ def main():
                             cwd=model_dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
                             encoding='utf-8', env=dict(os.environ, PYTHONIOENCODING='utf-8'))
     jobs = 0
-    for img in a.images:
-        name = os.path.splitext(os.path.basename(img))[0]
+    inputs = [{'front': img} for img in a.images]
+    if a.views:
+        inputs.append(dict(v.split('=', 1) for v in a.views))
+    for views in inputs:
+        first = views.get('front') or next(iter(views.values()))
+        name = os.path.splitext(os.path.basename(first))[0] + ('_mv' if len(views) > 1 else '')
         base = a.seed if a.seed is not None else random.randint(0, 2**31 - 1)
         for i in range(a.variants):
-            req = dict(cmd='generate', id=f'{name}-{base + i}', image=os.path.abspath(img),
+            req = dict(cmd='generate', id=f'{name}-{base + i}',
+                       views={k: os.path.abspath(v) for k, v in views.items()},
                        out=os.path.join(a.out, name), name=name, seed=base + i, remove_bg=not a.keep_background)
             for k in ('steps', 'guidance', 'res'):
                 if getattr(a, k) is not None:
