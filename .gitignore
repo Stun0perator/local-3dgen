@@ -1,0 +1,8 @@
+outputs/
+_test/
+*.log
+*.err
+__pycache__/
+*.pyc
+.venv/
+*.zip
