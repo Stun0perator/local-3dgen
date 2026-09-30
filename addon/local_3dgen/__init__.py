@@ -13,7 +13,7 @@ import atexit, json, os, queue, random, subprocess, threading, time
 
 import bpy
 import bpy.utils.previews
-from . import ams
+from . import colour
 from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty,
                        PointerProperty, StringProperty)
 
@@ -42,14 +42,6 @@ MODELS = {
         about="Fast (~10 s). Accepts several views of any angle. ~8 GB GPU memory",
         multiview=True, pref="trellis_dir"),
 }
-# painting backend (not a shape model; used by AMS > Clean colours)
-MODELS['hunyuan_paint'] = dict(
-    label="Hunyuan3D-Paint",
-    weights="https://huggingface.co/tencent/Hunyuan3D-2",
-    code="https://github.com/Tencent-Hunyuan/Hunyuan3D-2",
-    license="Tencent Hunyuan 3D 2.0 Community License (not valid in the EU, UK, South Korea)",
-    about="Paints clean, de-lit colours onto a model from its photo(s)",
-    multiview=True, pref="hunyuan_mv_dir")
 VIEWS = [('front', "Front", ""), ('left', "Left", ""), ('back', "Back", ""), ('right', "Right", "")]
 
 _previews = None
@@ -293,12 +285,7 @@ def _import_result(glb, job, inputs=None, color_source=None):
     ob.location = Vector(ctx["cursor"]) + Vector((job["slot"] * ctx["size_bu"] * 1.25, 0, 0))
     for poly in ob.data.polygons:
         poly.use_smooth = ctx["smooth"]
-    ob.name = ob.data.name = job.get("obname") or f'{job["name"]}_{job["backend"]}_s{job["seed"]}'
-    if job.get("replaces") and bpy.data.objects.get(job["replaces"]):
-        old = bpy.data.objects[job["replaces"]]
-        ob.location = old.location.copy()
-        old.hide_set(True)
-        old.hide_render = True
+    ob.name = ob.data.name = f'{job["name"]}_{job["backend"]}_s{job["seed"]}'
     ob["l3d_model"] = MODELS[job["backend"]]["label"]
     ob["l3d_seed"] = job["seed"]
     ob["l3d_images"] = json.dumps(job["req"].get("views") or {"front": job["req"]["image"]})
@@ -341,7 +328,7 @@ def queue_multiview(context, views):
         Engine.pending.append(dict(
             backend=p.model, name=name, seed=seed, slot=i, ctx=ctx,
             req=dict(cmd="generate", id=f"{name}-{seed}", views=views, out=os.path.join(out_root, name),
-                     name=name, seed=seed, remove_bg=p.remove_bg, **_model_opts(p))))
+                     name=name, seed=seed, remove_bg=p.remove_bg, colors=False, **_model_opts(p))))
         Engine.batch_total += 1
     if p.random_seed:
         p.seed = base_seed
@@ -371,7 +358,7 @@ def queue_images(context, paths):
             Engine.pending.append(dict(
                 backend=backend, name=name, seed=seed, slot=slot, ctx=ctx,
                 req=dict(cmd="generate", id=f"{name}-{seed}", image=img, out=os.path.join(out_root, name),
-                         name=name, seed=seed, remove_bg=p.remove_bg, **opts)))
+                         name=name, seed=seed, remove_bg=p.remove_bg, colors=False, **opts)))
             slot += 1
             Engine.batch_total += 1
         if p.random_seed:
@@ -674,23 +661,20 @@ class L3D_PT_panel(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Image to 3D"
-    bl_label = "Image to 3D"
+    bl_label = "Generate"
+    bl_order = 0
 
     def draw(self, context):
         p = context.scene.l3d
         L = self.layout
         busy = Engine.current is not None or bool(Engine.pending)
 
-        # model
-        col = L.column(align=True)
-        col.row(align=True).prop(p, "model", expand=True)
+        row = L.row(align=True)
+        row.prop(p, "model", expand=True)
         m = MODELS[p.model]
-        row = col.row(align=True)
-        row.operator("wm.url_open", text="Model weights", icon='URL').url = m["weights"]
-        row.operator("wm.url_open", text="Code", icon='URL').url = m["code"]
+        row.operator("wm.url_open", text="", icon='URL').url = m["weights"]
 
-        # engine
-        row = L.row()
+        row = L.row(align=True)
         if Engine.alive() and Engine.ready:
             row.label(text=f"{MODELS[Engine.backend]['label']} loaded", icon='CHECKMARK')
             row.operator("l3d.stop_engine", text="", icon='X')
@@ -698,24 +682,16 @@ class L3D_PT_panel(bpy.types.Panel):
             row.label(text=f"{Engine.status} {time.time() - Engine.started_at:.0f}s", icon='TIME')
             row.operator("l3d.stop_engine", text="", icon='X')
         else:
-            row.label(text=Engine.status, icon='SHADING_WIRE')
+            row.label(text="Model not loaded", icon='SHADING_WIRE')
             row.operator("l3d.start_engine", text="Load", icon='PLAY')
 
-        # images / drop zone
-        box = L.box()
-        box.row(align=True).prop(p, "mode", expand=True)
-        drop = box.row()
-        drop.alignment = 'CENTER'
-        if p.mode == 'multi':
-            drop.label(text="Drop photos of one object from different sides", icon='IMPORT')
-        else:
-            drop.label(text="Drop images onto this panel", icon='IMPORT')
+        L.row(align=True).prop(p, "mode", expand=True)
         if p.mode == 'multi' and not MODELS[p.model]["multiview"]:
-            warn = box.row()
+            warn = L.row()
             warn.alert = True
-            warn.label(text="Hunyuan 2.1 takes one image: use Hunyuan 2mv or TRELLIS", icon='ERROR')
-        row = box.row()
-        row.template_list("L3D_UL_images", "", p, "images", p, "active", rows=3)
+            warn.label(text="Pick Hunyuan 2mv or TRELLIS for several views", icon='ERROR')
+        row = L.row()
+        row.template_list("L3D_UL_images", "", p, "images", p, "active", rows=2)
         col = row.column(align=True)
         col.operator("l3d.add_images", text="", icon='ADD')
         col.operator("l3d.remove_image", text="", icon='REMOVE').clear_all = False
@@ -723,16 +699,50 @@ class L3D_PT_panel(bpy.types.Panel):
         if 0 <= p.active < len(p.images):
             ic = _icon(_p(p.images[p.active].path))
             if ic:
-                box.template_icon(icon_value=ic, scale=7)
-        row = box.row()
-        sub = row.row()
-        sub.enabled = p.mode == 'single'
-        sub.prop(p, "auto_generate")
-        row.prop(p, "remove_bg")
+                L.template_icon(icon_value=ic, scale=4)
+        else:
+            L.label(text="Drop images onto this panel", icon='IMPORT')
 
-        # settings
-        box = L.box()
-        col = box.column(align=True)
+        row = L.row(align=True)
+        row.scale_y = 1.4
+        if p.mode == 'multi':
+            text = f"Generate from {len(p.images)} view{'s' if len(p.images) != 1 else ''}"
+            row.operator("l3d.generate", text="Queue more" if busy else text, icon='MESH_MONKEY').all_images = True
+        else:
+            row.operator("l3d.generate", text="Queue more" if busy else "Generate", icon='MESH_MONKEY').all_images = False
+            if len(p.images) > 1:
+                row.operator("l3d.generate", text="All").all_images = True
+        if busy:
+            row.operator("l3d.cancel", text="", icon='CANCEL')
+            n = f"  {Engine.batch_done + 1}/{Engine.batch_total}" if Engine.batch_total > 1 else ""
+            if Engine.current is None:
+                L.progress(factor=0.0, type='BAR', text=f"Loading model...{n}")
+            else:
+                secs = int(time.time() - Engine.stage_at)
+                if Engine.stage in ("building mesh", "cleaning up", "saving", "removing background", "starting",
+                                    "colouring"):
+                    text = f"{Engine.stage.capitalize()}... {secs}s{n}"   # no step count for these stages
+                else:
+                    text = f"{Engine.stage.capitalize()} {int(Engine.frac * 100)}%{n}"
+                L.progress(factor=Engine.frac, type='BAR', text=text)
+        if Engine.last_error:
+            col = L.column()
+            col.alert = True
+            col.label(text=Engine.last_error, icon='ERROR')
+
+
+class L3D_PT_settings(bpy.types.Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Image to 3D"
+    bl_label = "Settings"
+    bl_parent_id = "L3D_PT_panel"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        p = context.scene.l3d
+        L = self.layout
+        col = L.column(align=True)
         if p.model in ('hunyuan', 'hunyuan_mv'):
             col.prop(p, "hy_res")
             col.prop(p, "hy_steps")
@@ -740,65 +750,22 @@ class L3D_PT_panel(bpy.types.Panel):
         else:
             col.prop(p, "tr_steps")
             col.prop(p, "tr_guidance")
-            col.prop(p, "tr_colors")
-        row = box.row(align=True)
+        row = L.row(align=True)
         sub = row.row(align=True)
         sub.enabled = not p.random_seed
         sub.prop(p, "seed")
         row.prop(p, "random_seed", toggle=True, icon='FILE_REFRESH', text="")
-        box.prop(p, "variants")
-        box.prop(p, "size_mm")
-        box.prop(p, "smooth")
-
-        # run
-        row = L.row(align=True)
-        row.scale_y = 1.6
-        if p.mode == 'multi':
-            text = f"Generate from {len(p.images)} view{'s' if len(p.images) != 1 else ''}"
-            row.operator("l3d.generate", text="Queue more" if busy else text, icon='MESH_MONKEY').all_images = True
-        else:
-            row.operator("l3d.generate", text="Queue more" if busy else "Generate", icon='MESH_MONKEY').all_images = False
-            sub = row.row(align=True)
-            sub.enabled = len(p.images) > 1
-            sub.operator("l3d.generate", text="All").all_images = True
-        if busy:
-            row.operator("l3d.cancel", text="", icon='CANCEL')
-            n = f"  {Engine.batch_done + 1}/{Engine.batch_total}" if Engine.batch_total > 1 else ""
-            if Engine.current is None:
-                L.progress(factor=0.0, type='BAR', text=f"Loading model…{n}")
-            else:
-                secs = int(time.time() - Engine.stage_at)
-                if Engine.stage in ("building mesh", "cleaning up", "saving", "removing background", "starting",
-                                    "preparing mesh", "painting", "transferring colours", "colouring"):
-                    text = f"{Engine.stage.capitalize()}... {secs}s{n}"   # no step count for these stages
-                else:
-                    text = f"{Engine.stage.capitalize()} {int(Engine.frac * 100)}%{n}"
-                L.progress(factor=Engine.frac, type='BAR', text=text)
-                quiet = time.time() - Engine.last_event
-                if quiet > 300:
-                    note = L.row()
-                    note.alert = True
-                    note.label(text=f"No progress for {int(quiet // 60)} min (High detail can be slow). X cancels",
-                               icon='INFO')
-
-        if Engine.last_error:
-            col = L.column()
-            col.alert = True
-            col.label(text=Engine.last_error, icon='ERROR')
-
-        if Engine.results:
-            box = L.box()
-            box.label(text="Recent", icon='OUTLINER_OB_MESH')
-            for name, info in Engine.results:
-                r = box.row(align=True)
-                r.operator("l3d.select", text=name, emboss=False).name = name
-                r.label(text=info)
+        L.prop(p, "variants")
+        L.prop(p, "size_mm")
+        row = L.row()
+        row.prop(p, "auto_generate", text="Generate on drop")
+        row.prop(p, "remove_bg", text="Cut out")
         L.operator("l3d.open_outputs", icon='FILE_FOLDER')
 
 
 classes = (L3D_Prefs, L3D_Image, L3D_Props, L3D_OT_add_images, L3D_FH_images, L3D_OT_remove_image,
            L3D_OT_generate, L3D_OT_start, L3D_OT_stop, L3D_OT_cancel, L3D_OT_open_outputs, L3D_OT_select,
-           L3D_UL_images, L3D_PT_panel)
+           L3D_UL_images, L3D_PT_panel, L3D_PT_settings)
 
 
 def register():
@@ -807,7 +774,7 @@ def register():
     for c in classes:
         bpy.utils.register_class(c)
     bpy.types.Scene.l3d = PointerProperty(type=L3D_Props)
-    ams.register()
+    colour.register()
 
 
 def unregister():
@@ -815,7 +782,7 @@ def unregister():
     Engine.stop(hard=True)
     if bpy.app.timers.is_registered(_tick):
         bpy.app.timers.unregister(_tick)
-    ams.unregister()
+    colour.unregister()
     del bpy.types.Scene.l3d
     for c in reversed(classes):
         bpy.utils.unregister_class(c)

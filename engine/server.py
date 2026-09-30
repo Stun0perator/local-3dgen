@@ -10,8 +10,6 @@ Protocol: one JSON request per line on stdin, one "@@" + JSON event per line on 
        "colors": true (default) puts vertex colours on the mesh; "color_source": "model" (the model's own
        colours; TRELLIS only, its default) or "photo" (project the input photos; always used for Hunyuan).
        The done event reports which one was used.
-       {"cmd": "paint", "id": ..., "mesh": glb path, "image"/"views": as above}  (painting backends:
-        paints the mesh from its photos; writes <mesh>_painted.glb with vertex colours)
        {"cmd": "quit"}
   out: {"ev": "status", "msg": str, "ready": bool?}
        {"ev": "progress", "id": ..., "stage": str, "frac": 0..1}
@@ -53,7 +51,7 @@ def watch_parent(pid):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--backend', required=True, choices=['hunyuan', 'hunyuan_mv', 'hunyuan_paint', 'trellis'])
+    ap.add_argument('--backend', required=True, choices=['hunyuan', 'hunyuan_mv', 'trellis'])
     ap.add_argument('--model-dir', required=True, help='clone of the model repo (with its .venv)')
     ap.add_argument('--parent-pid', type=int, default=0)
     a = ap.parse_args()
@@ -66,8 +64,6 @@ def main():
         from backends.hunyuan import Backend
     elif a.backend == 'hunyuan_mv':
         from backends.hunyuan_mv import Backend
-    elif a.backend == 'hunyuan_paint':
-        from backends.hunyuan_paint import Backend
     else:
         from backends.trellis import Backend
     import torch
@@ -128,28 +124,6 @@ def main():
         emit(ev='done', id=jid, glb=base + '.glb', inputs=inputs, color_source=color_source, verts=len(mesh.vertices), faces=len(mesh.faces),
              watertight=bool(mesh.is_watertight), seconds=round(time.time() - t, 1))
 
-    def paint(job):
-        """Colour an existing mesh (job['mesh'], a GLB) from its photo(s) with a painting backend."""
-        import trimesh
-        import colorize
-        jid = job.get('id')
-        t = time.time()
-        if not hasattr(backend, 'paint'):
-            raise ValueError(f'{backend.label} cannot paint meshes')
-        views = prepare(job)
-        progress = lambda stage, frac: emit(ev='progress', id=jid, stage=stage, frac=frac)
-        mesh = trimesh.load(job['mesh'], force='mesh', process=False)
-        textured, colors = backend.paint(mesh, views, job, progress)
-        base = os.path.splitext(job['mesh'])[0] + '_painted'
-        textured.export(base + '_textured.glb')  # the low-poly textured result, for reference
-        mesh.visual = trimesh.visual.ColorVisuals(mesh)
-        colorize.attach(mesh, colors)
-        emit(ev='progress', id=jid, stage='saving', frac=1.0)
-        mesh.export(base + '.glb')
-        emit(ev='done', id=jid, glb=base + '.glb', inputs=job.get('views') or {'front': job.get('image')},
-             color_source='paint', verts=len(mesh.vertices), faces=len(mesh.faces),
-             watertight=bool(mesh.is_watertight), seconds=round(time.time() - t, 1))
-
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -160,9 +134,9 @@ def main():
             emit(ev='error', id=None, msg='bad request: ' + line[:200]); continue
         if job.get('cmd') == 'quit':
             break
-        if job.get('cmd') in ('generate', 'paint'):
+        if job.get('cmd') == 'generate':
             try:
-                (generate if job['cmd'] == 'generate' else paint)(job)
+                generate(job)
             except torch.cuda.OutOfMemoryError:
                 torch.cuda.empty_cache()
                 emit(ev='error', id=job.get('id'),

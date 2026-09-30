@@ -8,7 +8,8 @@ image-to-3D models. No API keys, no cloud, no per-model fees.
   [TRELLIS](https://huggingface.co/microsoft/TRELLIS-image-large) (Microsoft).
 - **Drag and drop:** drop one or more image files onto the *Image to 3D* sidebar tab; each becomes a model.
 - **Multi-view:** give several photos of one object (front, left, back, right) for a more accurate model.
-- **AMS colours:** split the model into 1–16 filament colours and export a painted 3MF for multi-colour printing.
+- **AMS colours:** click regions of the model to colour them, then export a painted 3MF for multi-colour
+  printing.
 - **Stays loaded:** the model loads once per session (the first load takes a few minutes), then each model
   takes about a minute. Blender stays responsive while it works.
 - **Cleans up after itself:** the engine exits when Blender closes, including if Blender crashes, so it never
@@ -37,11 +38,6 @@ Downloaded automatically as dependencies:
 - [DINOv2](https://github.com/facebookresearch/dinov2), used by TRELLIS.
 - [U²-Net](https://github.com/xuebinqin/U-2-Net), for background removal through [rembg](https://github.com/danielgatis/rembg).
 
-Optional, for clean AMS colours: **Hunyuan3D-Paint** (the weights are
-[tencent/Hunyuan3D-2](https://huggingface.co/tencent/Hunyuan3D-2): `hunyuan3d-delight-v2-0` and
-`hunyuan3d-paint-v2-0-turbo`, about 12 GB of GPU memory). It removes lighting and shadows from your photo, then
-paints the model from several angles.
-
 TRELLIS.2 is not supported: it currently needs Linux and 24 GB or more of GPU memory.
 
 ## Requirements
@@ -61,9 +57,6 @@ TRELLIS.2 is not supported: it currently needs Linux and 24 GB or more of GPU me
    powershell -ExecutionPolicy Bypass -File setup\setup_trellis.ps1      # -> %USERPROFILE%\TRELLIS
    ```
    Pass `-Dir D:\somewhere` to install elsewhere.
-   For clean AMS colours, also install [CUDA Toolkit 12.8](https://developer.nvidia.com/cuda-12-8-1-download-archive)
-   (`winget install --id Nvidia.CUDA --version 12.8`) and Visual Studio 2022 Build Tools (C++), then run
-   `setup\setup_paint.ps1`, which compiles Hunyuan3D-Paint's GPU rasterizer.
 2. Install the Blender add-on. Pick one option:
    - **Link it**, so it updates with `git pull`:
      ```powershell
@@ -95,30 +88,27 @@ Tips:
 
 ## Multi-colour printing (AMS)
 
-Similar to Meshy's multi-colour print, but local. Select a generated model and open **Image to 3D > AMS colours**:
+The AI makes the shape; you decide the colours, by clicking. Select a generated model and open
+**Image to 3D > Colour for AMS**:
 
-1. Optional but recommended: **Clean colours (Hunyuan3D-Paint)**. It repaints the model with the lighting and
-   shadows removed, in about 90 s, and replaces it with a painted copy. Without this, shadows in the photo or
-   model turn into dark patches.
-2. Set **Colours** (the number of filaments), then click the eyedropper. The palette is taken from the source
-   photo(s), so the colours are clean, not the shaded ones on the mesh. You can edit any swatch.
-3. **Regions from**: *Auto* uses the model's own colours when it generated them (TRELLIS; they line up exactly
-   with the geometry), and otherwise flattens the photos into regions and projects them. When projecting, the
-   camera angle of the photo is matched automatically.
-4. **Mirror**: for symmetric pieces like pots and vases, copy the front's colours onto the back, since the back
-   is guessed.
-5. **Assign colours**. Specks smaller than *Smallest patch* are merged, and borders are smoothed over
-   *Border smoothing* mm and subdivided so they can run between triangle edges. The defaults (1 mm² and
-   1.2 mm) suit a 0.4 mm nozzle: finer detail than that doesn't print as distinct colour. Touch up
-   by hand if needed: Edit Mode, select faces, then *Material > Assign*.
-6. **Fix-ups**:
-   - *Fix cutout rims*: the walls of holes take the colour of the part they're cut into (Rim), not the colour
-     showing through them (Through).
-   - *Level border*: snaps the border of the bottom colour region (e.g. a base band) to a horizontal line.
-     Height 0 detects it automatically.
-7. **Export 3MF**: a Bambu Studio project with per-triangle colour painting, using the same layout as Meshy's
-   multi-colour export. The chosen printer and one PLA filament per palette colour are preset. Load it with
+1. Set **Filaments** and pick the swatch colours. The eyedropper takes them from the source photo.
+2. Pick your base colour's swatch and press **Fill all**.
+3. **Split into regions**: the model is cut into regions along its shape (ribs, rims, lips, feet and knobs
+   become their own regions; the smoother surface is cut where parts meet). **Seams** sets how readily it
+   cuts.
+4. **Click to colour**, then in the viewport:
+   - **Click** a region to fill it with the active swatch.
+   - **Shift-click** fills every region of the same size and shape (all the feet, for example).
+   - **Alt-drag** paints with a brush, for colour changes the shape doesn't mark. `[` and `]` resize it.
+   - **1–9** switch swatch, **Ctrl+Z** undoes, and **right-click, Enter or Esc** finishes.
+   - Orbit, pan and zoom work as usual.
+5. **Band**: everything between two heights gets the active swatch, with a straight, subdivided edge
+   (bases, stripes).
+6. **Export**: a Bambu Studio 3MF with one PLA filament per swatch and the printer preset set. Load it with
    *File > Import > Import 3D Models*.
+
+Region borders sit on the model's triangles, which are about 0.2–0.4 mm across at 1M triangles. That's as
+fine as a 0.4 mm nozzle can place a colour change.
 
 ## Command line
 
@@ -135,7 +125,6 @@ Blender add-on (addon/local_3dgen)
    └─ starts engine/server.py with the chosen model's own .venv Python
         ├─ backends/hunyuan.py     → Hunyuan3D-2.1 (hy3dshape)
         ├─ backends/hunyuan_mv.py  → Hunyuan3D-2mv (hy3dgen)
-        ├─ backends/hunyuan_paint.py → Hunyuan3D-Paint: repaints an existing mesh (the "paint" request)
         └─ backends/trellis.py     → TRELLIS, single or multi-image (+ shims for xformers / kaolin)
    JSON lines over stdin/stdout: generate requests in; progress, done and error events out
 ```
