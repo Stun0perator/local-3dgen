@@ -1,4 +1,4 @@
-"""Tencent Hunyuan3D-Paint v2.0 (turbo): paints a clean, de-lit texture onto an existing mesh from its photo(s).
+"""Tencent Hunyuan3D-Paint v2.0 (turbo or full): paints a clean, de-lit texture onto an existing mesh from its photo(s).
 Weights: https://huggingface.co/tencent/Hunyuan3D-2 (hunyuan3d-delight-v2-0 + hunyuan3d-paint-v2-0-turbo).
 Code: https://github.com/Tencent-Hunyuan/Hunyuan3D-2 (hy3dgen.texgen; needs the custom_rasterizer CUDA
 extension, see setup/build_paint_ext.cmd).
@@ -6,14 +6,15 @@ extension, see setup/build_paint_ext.cmd).
 The first step removes lighting and shadows from the photo, which is what makes colours usable for AMS
 printing. Painting works on a reduced copy of the mesh (UV unwrapping a dense mesh is slow); the texture's
 colours are then transferred back onto every vertex of the full mesh as vertex colours.
-Job options: paint_faces (60000).
+Job options: paint_faces (60000), paint_quality ('turbo' default | 'full': the non-turbo model, slower,
+more detailed), texture_size (2048; 4096 for more colour detail, more GPU memory).
 """
 import sys
 
 import numpy as np
 
 MODEL_ID = 'tencent/Hunyuan3D-2'
-SUBFOLDER = 'hunyuan3d-paint-v2-0-turbo'
+SUBFOLDERS = {'turbo': 'hunyuan3d-paint-v2-0-turbo', 'full': 'hunyuan3d-paint-v2-0'}
 
 
 class Backend:
@@ -25,7 +26,22 @@ class Backend:
         from hy3dgen.shapegen.postprocessors import FaceReducer
         from hy3dgen.texgen import Hunyuan3DPaintPipeline
         self.reduce = FaceReducer()
-        self.pipe = Hunyuan3DPaintPipeline.from_pretrained(MODEL_ID, subfolder=SUBFOLDER)
+        self._cls = Hunyuan3DPaintPipeline
+        self.quality = None
+        self.pipe = None
+        self._load('turbo')
+
+    def _load(self, quality):
+        """One paint model in GPU memory at a time; switching quality reloads."""
+        if quality == self.quality:
+            return
+        import gc
+        import torch
+        self.pipe = None
+        gc.collect()
+        torch.cuda.empty_cache()
+        self.pipe = self._cls.from_pretrained(MODEL_ID, subfolder=SUBFOLDERS[quality])
+        self.quality = quality
 
     def generate(self, views, job, progress):
         raise ValueError('Hunyuan3D-Paint colours an existing mesh; send a "paint" request')
@@ -34,6 +50,13 @@ class Backend:
         """-> (textured low-poly mesh, sRGB colours for each vertex of `mesh`)."""
         import trimesh
         import colorize
+        quality = job.get('paint_quality', 'turbo')
+        if quality != self.quality:
+            progress('loading paint model', 0.0)
+            self._load(quality)
+        size = int(job.get('texture_size', 2048))
+        self.pipe.config.texture_size = size
+        self.pipe.render.set_default_texture_resolution(size)
         progress('preparing mesh', 0.0)
         low = self.reduce(mesh.copy(), max_facenum=int(job.get('paint_faces', 60000)))
         order = [v for v in ('front', 'left', 'back', 'right') if v in views]  # front first: the reference

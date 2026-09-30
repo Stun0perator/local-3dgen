@@ -253,6 +253,128 @@ def _read_float(me, name):
     return buf
 
 
+def _labels(me):
+    lab = np.empty(len(me.polygons), dtype=np.int32)
+    me.polygons.foreach_get('material_index', lab)
+    return lab
+
+
+def _write_labels(context, ob, labels):
+    me = ob.data
+    me.polygons.foreach_set('material_index', labels.astype(np.int32))
+    me.update()
+    p = context.scene.l3d_ams
+    area = np.empty(len(me.polygons)); me.polygons.foreach_get('area', area)
+    shares = np.bincount(labels, weights=area, minlength=len(p.palette)) / area.sum()
+    for it, sh in zip(p.palette, shares):
+        it.share = float(sh)
+
+
+def _face_geometry(context, ob):
+    """Face centres (world, mm) and unit normals (world)."""
+    me = ob.data
+    nf = len(me.polygons)
+    cen = np.empty(nf * 3); me.polygons.foreach_get('center', cen); cen = cen.reshape(-1, 3)
+    nor = np.empty(nf * 3); me.polygons.foreach_get('normal', nor); nor = nor.reshape(-1, 3)
+    M = np.array(ob.matrix_world)
+    mm, _ = world_scale_mm(context, ob)
+    cen_w = (cen @ M[:3, :3].T + M[:3, 3]) * mm
+    nor_w = nor @ np.linalg.inv(M[:3, :3])  # normals transform by the inverse-transpose
+    nor_w /= np.maximum(np.linalg.norm(nor_w, axis=1, keepdims=True), 1e-12)
+    return cen_w, nor_w
+
+
+def fix_rims(context, ob, labels, rim, through, depth_mm):
+    """Faces of colour `through` inside a cutout (within depth_mm of the `rim` colour along the surface, and
+    not facing the same way as the rim surface they are reached from) get the rim colour: the walls of a
+    hole belong to the part the hole is cut into, not to what shows through it."""
+    me = ob.data
+    a, b = face_adjacency(me)
+    cen, nor = _face_geometry(context, ob)
+    step = np.linalg.norm(cen[a] - cen[b], axis=1)
+    dist = np.where(labels == rim, 0.0, np.inf)
+    srcn = nor.copy()
+    ok = (labels == rim) | (labels == through)
+    for _ in range(2000):
+        changed = False
+        for u, v in ((a, b), (b, a)):
+            cand = dist[u] + step
+            m = (cand < dist[v]) & ok[v] & (cand <= depth_mm)
+            if not m.any():
+                continue
+            idx = np.nonzero(m)[0]
+            idx = idx[np.argsort(-cand[idx])]  # smallest distance is written last, so it wins
+            dist[v[idx]] = cand[idx]
+            srcn[v[idx]] = srcn[u[idx]]
+            changed = True
+        if not changed:
+            break
+    facing_same = (nor * srcn).sum(1) > 0.5  # e.g. the liner's outside, seen through the hole
+    sel = (labels == through) & np.isfinite(dist) & ~facing_same
+    out = labels.copy()
+    out[sel] = rim
+    return out, int(sel.sum())
+
+
+def level_border(context, ob, below, above, height_mm, band_mm, levels=2):
+    """Snap the border between the bottom region of colour `below` (e.g. a base band: the `below` area that
+    touches the bottom of the model) and colour `above` to a horizontal line, Z in mm from the model's bottom.
+    Other areas of the `below` colour (e.g. black stars higher up) are left alone. Border triangles are
+    subdivided `levels` times so the line comes out crisp."""
+    import bmesh
+    me = ob.data
+    cen, _ = _face_geometry(context, ob)
+    z0 = cen[:, 2].min()
+
+    def base_region(labels, z):
+        a, b = face_adjacency(me)
+        same = (labels[a] == below) & (labels[b] == below)
+        comp = components(len(labels), a[same], b[same])
+        bottom = np.unique(comp[(labels == below) & (z < 1.5)])
+        return np.isin(comp, bottom) & (labels == below), a, b
+
+    labels = _labels(me)
+    z = cen[:, 2] - z0
+    base, a, b = base_region(labels, z)
+    if not base.any():
+        raise ValueError("No area of the 'Below' colour touches the bottom of the model")
+    if height_mm <= 0:  # detect it from the base region's border with the `above` colour
+        m = (base[a] & (labels[b] == above)) | (base[b] & (labels[a] == above))
+        if not m.any():
+            raise ValueError("The bottom region doesn't touch the 'Above' colour")
+        height_mm = float(np.median(np.concatenate([z[a[m]], z[b[m]]])))
+    for level in range(levels + 1):
+        cen, _ = _face_geometry(context, ob)
+        labels = _labels(me)
+        z = cen[:, 2] - z0
+        base, a, b = base_region(labels, z)
+        band = np.abs(z - height_mm) <= band_mm
+        to_below = band & (labels == above) & (z < height_mm)
+        to_above = band & base & (z >= height_mm)
+        labels[to_below] = below
+        labels[to_above] = above
+        sel = band & ((labels == below) | (labels == above))
+        me.polygons.foreach_set('material_index', labels.astype(np.int32))
+        me.update()
+        if level == levels:
+            break
+        a, b = face_adjacency(me)
+        diff = labels[a] != labels[b]
+        on_line = np.zeros(len(labels), dtype=bool)
+        on_line[a[diff]] = True
+        on_line[b[diff]] = True
+        on_line &= sel
+        if not on_line.any():
+            break
+        bm = bmesh.new(); bm.from_mesh(me); bm.faces.ensure_lookup_table()
+        edges = {e for i in np.nonzero(on_line)[0] for e in bm.faces[i].edges}
+        res = bmesh.ops.subdivide_edges(bm, edges=list(edges), cuts=1, use_grid_fill=True)
+        touched = {f for e in res['geom_split'] if isinstance(e, bmesh.types.BMEdge) for f in e.link_faces}
+        bmesh.ops.triangulate(bm, faces=[f for f in touched if len(f.verts) > 3])
+        bm.to_mesh(me); bm.free(); me.update()
+    return height_mm
+
+
 def mirror_labels(me, labels, axis):
     """Copy the labels of one half onto the other (for symmetric objects: the photographed half is the
     reliable one). axis 'front_back': front half (-Y, where the photo camera is) -> back half.
@@ -299,7 +421,7 @@ class L3D_AMSProps(bpy.types.PropertyGroup):
     refine: IntProperty(name="Border detail", default=1, min=0, max=2,
                         description="Split triangles along colour borders this many times so borders follow "
                                     "the photo (each level up to 4x the border triangles)")
-    min_area: FloatProperty(name="Smallest patch (mm²)", default=0.12, min=0.0, soft_max=50.0, precision=2,
+    min_area: FloatProperty(name="Smallest patch (mm²)", default=1.0, min=0.0, soft_max=50.0, precision=2,
                             step=1, description="Colour patches smaller than this merge into their neighbour. "
                                                 "About 0.16 mm² (one 0.4 mm line) is the smallest dot that prints")
     printer: EnumProperty(name="Printer", default='X1C', items=[
@@ -317,9 +439,22 @@ class L3D_AMSProps(bpy.types.PropertyGroup):
         ('left_right', "Left to right", "Symmetric object: copy one side's colours onto the other")])
     smooth: IntProperty(name="Smooth borders", default=3, min=0, max=15,
                         description="Pre-clean passes (neighbour vote) before the border smoothing")
-    border_mm: FloatProperty(name="Border smoothing (mm)", default=1.5, min=0.0, soft_max=6.0,
+    border_mm: FloatProperty(name="Border smoothing (mm)", default=1.2, min=0.0, soft_max=6.0,
                              description="How far colour borders are smoothed along the surface: removes the "
                                          "triangle staircase and hair-thin slivers (0 = off)")
+    rim_slot: IntProperty(name="Rim colour", default=2, min=1, max=16,
+                          description="Slot of the part the holes are cut into (e.g. the white shell)")
+    through_slot: IntProperty(name="Seen-through colour", default=1, min=1, max=16,
+                              description="Slot of what shows through the holes (e.g. the red liner)")
+    rim_depth: FloatProperty(name="Rim depth (mm)", default=6.0, min=0.5, soft_max=30.0,
+                             description="How far into a hole the rim colour reaches (about the wall thickness)")
+    level_below: IntProperty(name="Below", default=3, min=1, max=16, description="Slot under the border")
+    level_above: IntProperty(name="Above", default=2, min=1, max=16, description="Slot above the border")
+    level_height: FloatProperty(name="Height (mm)", default=0.0, min=0.0, soft_max=500.0,
+                                description="Border height from the bottom of the model (0 = detect it from the "
+                                            "current border)")
+    level_band: FloatProperty(name="Band (mm)", default=6.0, min=0.5, soft_max=40.0,
+                              description="Only faces this close to the border height are changed")
     border_levels: IntProperty(name="Border detail", default=2, min=0, max=3,
                                description="Subdivide triangles along colour borders this many times so the "
                                            "smoothed border can run through them")
@@ -369,6 +504,49 @@ class L3D_OT_ams_pick(bpy.types.Operator):
         p.palette.clear()
         for j in order:
             it = p.palette.add(); it.color = tuple(float(x) for x in cols[j]); it.share = float(shares[j])
+        return {'FINISHED'}
+
+
+class L3D_OT_ams_rims(bpy.types.Operator):
+    """Give the walls of cutouts the colour of the part they are cut into, instead of the colour that shows
+    through the hole"""
+    bl_idname = "l3d.ams_rims"
+    bl_label = "Fix cutout rims"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        ob = _active_mesh(context)
+        p = context.scene.l3d_ams
+        if ob is None or not any(MAT_PREFIX in (m.name if m else "") for m in ob.data.materials):
+            self.report({'ERROR'}, "Assign colours first"); return {'CANCELLED'}
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        labels, n = fix_rims(context, ob, _labels(ob.data), p.rim_slot - 1, p.through_slot - 1, p.rim_depth)
+        _write_labels(context, ob, labels)
+        self.report({'INFO'}, f"{n:,} rim triangles set to slot {p.rim_slot}")
+        return {'FINISHED'}
+
+
+class L3D_OT_ams_level(bpy.types.Operator):
+    """Snap the border between two colours to a straight horizontal line (bands on pots, bases)"""
+    bl_idname = "l3d.ams_level"
+    bl_label = "Level border"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        ob = _active_mesh(context)
+        p = context.scene.l3d_ams
+        if ob is None or not any(MAT_PREFIX in (m.name if m else "") for m in ob.data.materials):
+            self.report({'ERROR'}, "Assign colours first"); return {'CANCELLED'}
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        try:
+            h = level_border(context, ob, p.level_below - 1, p.level_above - 1, p.level_height, p.level_band)
+        except ValueError as e:
+            self.report({'ERROR'}, str(e)); return {'CANCELLED'}
+        _write_labels(context, ob, _labels(ob.data))
+        p.level_height = round(h, 2)
+        self.report({'INFO'}, f"Border levelled at {h:.1f} mm")
         return {'FINISHED'}
 
 
@@ -701,6 +879,20 @@ class L3D_PT_ams(bpy.types.Panel):
         row.scale_y = 1.3
         row.enabled = has_cols
         row.operator("l3d.ams_assign", icon='BRUSH_DATA')
+        box = L.box()
+        box.label(text="Fix-ups", icon='MODIFIER')
+        r = box.row(align=True)
+        r.prop(p, "rim_slot", text="Rim")
+        r.prop(p, "through_slot", text="Through")
+        r.prop(p, "rim_depth", text="Depth")
+        box.operator("l3d.ams_rims", icon='MOD_SOLIDIFY')
+        r = box.row(align=True)
+        r.prop(p, "level_below")
+        r.prop(p, "level_above")
+        r = box.row(align=True)
+        r.prop(p, "level_height", text="Height (0 = auto)")
+        r.prop(p, "level_band", text="Band")
+        box.operator("l3d.ams_level", icon='ALIGN_JUSTIFY')
         L.label(text="Touch up: Edit Mode, select faces, Material > Assign", icon='INFO')
         row = L.row()
         row.scale_y = 1.3
@@ -708,7 +900,7 @@ class L3D_PT_ams(bpy.types.Panel):
         row.operator("l3d.ams_export", icon='EXPORT')
 
 
-classes = (L3D_AMSColor, L3D_AMSProps, L3D_OT_ams_paint, L3D_OT_ams_pick, L3D_OT_ams_assign, L3D_OT_ams_export, L3D_PT_ams)
+classes = (L3D_AMSColor, L3D_AMSProps, L3D_OT_ams_rims, L3D_OT_ams_level, L3D_OT_ams_paint, L3D_OT_ams_pick, L3D_OT_ams_assign, L3D_OT_ams_export, L3D_PT_ams)
 
 
 def register():

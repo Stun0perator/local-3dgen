@@ -108,9 +108,15 @@ Similar to Meshy's multi-colour print, but local. Select a generated model and o
 4. **Mirror**: for symmetric pieces like pots and vases, copy the front's colours onto the back, since the back
    is guessed.
 5. **Assign colours**. Specks smaller than *Smallest patch* are merged, and borders are smoothed over
-   *Border smoothing* mm and subdivided so they can run between triangle edges. Touch up
+   *Border smoothing* mm and subdivided so they can run between triangle edges. The defaults (1 mm² and
+   1.2 mm) suit a 0.4 mm nozzle: finer detail than that doesn't print as distinct colour. Touch up
    by hand if needed: Edit Mode, select faces, then *Material > Assign*.
-6. **Export 3MF**: a Bambu Studio project with per-triangle colour painting, using the same layout as Meshy's
+6. **Fix-ups**:
+   - *Fix cutout rims*: the walls of holes take the colour of the part they're cut into (Rim), not the colour
+     showing through them (Through).
+   - *Level border*: snaps the border of the bottom colour region (e.g. a base band) to a horizontal line.
+     Height 0 detects it automatically.
+7. **Export 3MF**: a Bambu Studio project with per-triangle colour painting, using the same layout as Meshy's
    multi-colour export. The chosen printer and one PLA filament per palette colour are preset. Load it with
    *File > Import > Import 3D Models*.
 
