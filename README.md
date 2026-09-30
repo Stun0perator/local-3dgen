@@ -8,6 +8,7 @@ image-to-3D models. No API keys, no cloud, no per-model fees.
   [TRELLIS](https://huggingface.co/microsoft/TRELLIS-image-large) (Microsoft).
 - **Drag and drop:** drop one or more image files onto the *Image to 3D* sidebar tab; each becomes a model.
 - **Multi-view:** give several photos of one object (front, left, back, right) for a more accurate model.
+- **AMS colours:** split the model into 1–16 filament colours and export a painted 3MF for multi-colour printing.
 - **Stays loaded:** the model loads once per session (the first load takes a few minutes), then each model
   takes about a minute. Blender stays responsive while it works.
 - **Cleans up after itself:** the engine exits when Blender closes, including if Blender crashes, so it never
@@ -83,6 +84,25 @@ Tips:
 - Multi-view photos: same object, lighting and distance, roughly 90° apart, plain background.
 - Switching models, or pressing ✕, unloads the current model to free GPU memory.
 - Each result is also saved as a GLB in `outputs/<image name>/`, next to the cut-out input image.
+
+## Multi-colour printing (AMS)
+
+Similar to Meshy's multi-colour print, but local. Select a generated model and open **Image to 3D > AMS colours**:
+
+1. Set **Colours** (the number of filaments), then click the eyedropper. The palette is taken from the source
+   photo(s), so the colours are clean, not the shaded ones on the mesh. You can edit any swatch.
+2. **Regions from**: *Auto* uses the model's own colours when it generated them (TRELLIS; they line up exactly
+   with the geometry), and otherwise flattens the photos into regions and projects them. When projecting, the
+   camera angle of the photo is matched automatically.
+3. **Mirror**: for symmetric pieces like pots and vases, copy the front's colours onto the back, since the back
+   is guessed.
+4. **Assign colours**. Specks smaller than *Smallest patch* are merged away and borders are smoothed. Touch up
+   by hand if needed: Edit Mode, select faces, then *Material > Assign*.
+5. **Export 3MF**: one solid object with per-triangle colour painting, which is Bambu Studio's and
+   PrusaSlicer's multi-colour format. Load it with *File > Import*, and set the filaments in the order of the
+   slots (the hex colours are listed in `Metadata/ams_colours.txt` inside the 3MF).
+
+Status: the colour regions work well, but loading the 3MF in Bambu Studio / OrcaSlicer hasn't been verified yet.
 
 ## Command line
 

@@ -50,8 +50,9 @@ class Backend:
         import trimesh
         steps = int(job.get('steps', 12))
         self._track(progress, ['shaping (structure)', 'shaping (detail)'])
-        # the model's own colours, only when asked for (default is projecting the photos, done by the server)
-        want_colors = job.get('colors', True) and job.get('color_source', 'photo') == 'model'
+        # TRELLIS's own colours are generated with the shape, so they sit exactly on the geometry (default);
+        # color_source 'photo' leaves colouring to the server's photo projection instead
+        want_colors = job.get('colors', True) and job.get('color_source', 'model') == 'model'
         params = dict(seed=int(job['seed']), formats=['mesh', 'gaussian'] if want_colors else ['mesh'],
                       sparse_structure_sampler_params={'steps': steps, 'cfg_strength': float(job.get('guidance', 7.5))},
                       slat_sampler_params={'steps': steps, 'cfg_strength': 3.0})

@@ -12,7 +12,7 @@ import zipfile
 
 import bpy
 import numpy as np
-from bpy.props import (CollectionProperty, FloatProperty, FloatVectorProperty,
+from bpy.props import (CollectionProperty, EnumProperty, FloatProperty, FloatVectorProperty,
                        IntProperty, PointerProperty, StringProperty)
 
 MAT_PREFIX = "AMS "
@@ -170,6 +170,29 @@ def merge_small_regions(labels, a, b, area, k, min_area, rounds=4):
     return labels
 
 
+def mirror_labels(me, labels, axis):
+    """Copy the labels of one half onto the other (for symmetric objects: the photographed half is the
+    reliable one). axis 'front_back': front half (-Y, where the photo camera is) -> back half.
+    'left_right': the -X half -> +X half."""
+    from mathutils.kdtree import KDTree
+    nf = len(me.polygons)
+    cen = np.empty(nf * 3); me.polygons.foreach_get('center', cen); cen = cen.reshape(-1, 3)
+    ax = 1 if axis == 'front_back' else 0
+    mid = (cen[:, ax].min() + cen[:, ax].max()) / 2
+    src = np.nonzero(cen[:, ax] <= mid)[0]
+    dst = np.nonzero(cen[:, ax] > mid)[0]
+    tree = KDTree(len(src))
+    for i, j in enumerate(src):
+        tree.insert(cen[j], i)
+    tree.balance()
+    out = labels.copy()
+    m = cen[dst].copy()
+    m[:, ax] = 2 * mid - m[:, ax]
+    for j, q in zip(dst, m):
+        out[j] = labels[src[tree.find(q)[1]]]
+    return out
+
+
 def world_scale_mm(context, ob):
     unit = context.scene.unit_settings.scale_length or 1.0
     return unit * 1000.0, ob.matrix_world
@@ -190,8 +213,20 @@ class L3D_AMSProps(bpy.types.PropertyGroup):
     target_faces: IntProperty(name="Simplify to faces", default=200000, min=0, soft_max=1000000,
                               description="Reduce the mesh before assigning colours (0 = keep). Slicers get "
                                           "slow with millions of painted triangles")
+    refine: IntProperty(name="Border detail", default=1, min=0, max=2,
+                        description="Split triangles along colour borders this many times so borders follow "
+                                    "the photo (each level up to 4x the border triangles)")
     min_area: FloatProperty(name="Smallest patch (mm²)", default=12.0, min=0.0, soft_max=200.0,
                             description="Colour patches smaller than this merge into their neighbour")
+    regions: EnumProperty(name="Regions from", default='auto', items=[
+        ('auto', "Auto", "The model's own colours when it made them (TRELLIS), else the photos"),
+        ('model', "Model colours", "The mesh's vertex colours: line up with the geometry, carry some shading"),
+        ('photo', "Photos", "Flatten the photos into regions and project them (Hunyuan models)")])
+    mirror: EnumProperty(name="Mirror", default='none', items=[
+        ('none', "No mirroring", "Colour every side from the model / photos"),
+        ('front_back', "Front to back", "Symmetric object: copy the front's colours onto the back (the "
+                                        "back is guessed and often darker)"),
+        ('left_right', "Left to right", "Symmetric object: copy one side's colours onto the other")])
     smooth: IntProperty(name="Smooth borders", default=3, min=0, max=15,
                         description="Passes that straighten jagged colour borders")
 
@@ -213,14 +248,22 @@ class L3D_OT_ams_pick(bpy.types.Operator):
         ob = _active_mesh(context)
         if ob is None:
             self.report({'ERROR'}, "Select a generated model first"); return {'CANCELLED'}
+        p = context.scene.l3d_ams
+        from . import paint2d
+        srcs = paint2d.source_images(ob)
+        if srcs:  # palette from the photo(s): far cleaner than the mesh's shaded colours
+            cols, shares = paint2d.palette_from_images([paint2d.load_rgba(x) for x in srcs.values()], p.count)
+            p.palette.clear()
+            for c, s in zip(cols, shares):
+                it = p.palette.add(); it.color = tuple(float(x) for x in c); it.share = float(s)
+            return {'FINISHED'}
         fc = face_colors(ob.data)
         if fc is None:
-            self.report({'ERROR'}, "This model has no colours (generate it again with this version)")
+            self.report({'ERROR'}, "This model has no colours or source photos")
             return {'CANCELLED'}
         area = np.empty(len(ob.data.polygons)); ob.data.polygons.foreach_get('area', area)
         rng = np.random.default_rng(0)
         idx = rng.choice(len(fc), size=min(len(fc), 40000), replace=False, p=area / area.sum())
-        p = context.scene.l3d_ams
         centers, lab = kmeans(features(fc[idx]), p.count, iters=30)
         # report the palette as real sRGB colours (lit part of each cluster), most-used first
         cols, shares = [], []
@@ -258,22 +301,37 @@ class L3D_OT_ams_assign(bpy.types.Operator):
             with context.temp_override(object=ob, active_object=ob):
                 bpy.ops.object.modifier_apply(modifier=md.name)
             me = ob.data
-        fc = face_colors(me)
-        if fc is None:
-            self.report({'ERROR'}, "This model has no colours"); return {'CANCELLED'}
         k = len(p.palette)
         pal = np.array([it.color[:] for it in p.palette])
-        labels = np.argmin(((features(fc)[:, None, :] - features(pal)[None]) ** 2).sum(-1), axis=1)
-
-        a, b = face_adjacency(me)
+        from . import paint2d
+        use_photos = bool(paint2d.source_images(ob)) and (
+            p.regions == 'photo' or (p.regions == 'auto' and ob.get("l3d_color_source") != 'model'))
+        if use_photos:
+            # Meshy-style: flatten the photo(s) into regions, project them, refine the borders
+            labels, _ = paint2d.assign_from_photos(context, ob, pal, refine=p.refine, smooth=p.smooth,
+                                                    min_area=p.min_area)
+            me = ob.data
+            if p.mirror != 'none':
+                labels = mirror_labels(me, labels, p.mirror)
+        else:  # no photos: use the mesh's own vertex colours
+            fc = face_colors(me)
+            if fc is None:
+                self.report({'ERROR'}, "This model has no colours or source photos"); return {'CANCELLED'}
+            labels = np.argmin(((features(fc)[:, None, :] - features(pal)[None]) ** 2).sum(-1), axis=1)
+            a, b = face_adjacency(me)
+            labels = majority_smooth(labels, a, b, k, p.smooth)
+            if p.mirror != 'none':
+                labels = mirror_labels(me, labels, p.mirror)
+            if p.min_area > 0:
+                mm, mw = world_scale_mm(context, ob)
+                scale = np.cbrt(abs(np.linalg.det(np.array(mw.to_3x3())))) * mm
+                ar = np.empty(len(me.polygons)); me.polygons.foreach_get('area', ar)
+                labels = merge_small_regions(labels, a, b, ar * scale ** 2, k, p.min_area)
+                labels = majority_smooth(labels, a, b, k, 1)
         mm, mw = world_scale_mm(context, ob)
         scale = np.cbrt(abs(np.linalg.det(np.array(mw.to_3x3())))) * mm
         area = np.empty(len(me.polygons)); me.polygons.foreach_get('area', area)
         area *= scale ** 2
-        labels = majority_smooth(labels, a, b, k, p.smooth)
-        if p.min_area > 0:
-            labels = merge_small_regions(labels, a, b, area, k, p.min_area)
-            labels = majority_smooth(labels, a, b, k, 1)
 
         me.materials.clear()
         for i, it in enumerate(p.palette):
@@ -426,7 +484,8 @@ class L3D_PT_ams(bpy.types.Panel):
         if ob is None:
             L.label(text="Select a generated model", icon='INFO')
             return
-        has_cols = len(ob.data.color_attributes) > 0
+        from . import paint2d
+        has_cols = len(ob.data.color_attributes) > 0 or bool(paint2d.source_images(ob))
         if not has_cols:
             L.label(text="No colours on this model", icon='ERROR')
         L.label(text=ob.name, icon='OBJECT_DATA')
@@ -439,7 +498,15 @@ class L3D_PT_ams(bpy.types.Panel):
             r.label(text=f"Slot {i + 1}")
             r.prop(it, "color", text="")
             r.label(text=f"{it.share:.0%}" if it.share else "")
+        from . import paint2d
+        srcs = paint2d.source_images(ob)
+        L.label(text=(f"Colours from {len(srcs)} photo{'s' if len(srcs) != 1 else ''} ({', '.join(srcs)})"
+                      if srcs else "Colours from the mesh (no source photos found)"), icon='IMAGE_DATA')
+        L.prop(p, "regions")
         L.prop(p, "target_faces")
+        if srcs:
+            L.prop(p, "refine")
+        L.prop(p, "mirror", text="")
         L.prop(p, "min_area")
         L.prop(p, "smooth")
         row = L.row()

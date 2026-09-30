@@ -7,8 +7,9 @@ Protocol: one JSON request per line on stdin, one "@@" + JSON event per line on 
   in : {"cmd": "generate", "id": ..., "image": path  OR  "views": {"front": path, "left": path, ...},
         "out": dir, "name": str, "seed": int, "remove_bg": bool, ...backend options (see backends/*.py)}
        View names: front, left, back, right. Multi-view needs a backend with multiview = True.
-       "colors": true (default) puts vertex colours on the mesh; "color_source": "photo" (default,
-       project the input photos) or "model" (the model's own colours, TRELLIS only).
+       "colors": true (default) puts vertex colours on the mesh; "color_source": "model" (the model's own
+       colours; TRELLIS only, its default) or "photo" (project the input photos; always used for Hunyuan).
+       The done event reports which one was used.
        {"cmd": "quit"}
   out: {"ev": "status", "msg": str, "ready": bool?}
        {"ev": "progress", "id": ..., "stage": str, "frac": 0..1}
@@ -100,14 +101,18 @@ def main():
         views = prepare(job)
         os.makedirs(job['out'], exist_ok=True)
         base = os.path.join(job['out'], f"{job.get('name', 'model')}_{a.backend}_s{job['seed']}")
+        inputs = {}
         for view, img in views.items():
-            img.save(f'{base}_input_{view}.png')
+            inputs[view] = f'{base}_input_{view}.png'
+            img.save(inputs[view])
         progress = lambda stage, frac: emit(ev='progress', id=jid, stage=stage, frac=frac)
+        color_source = None
         mesh = backend.generate(views, job, progress)
         if job.get('colors', True):
             import numpy as np
             import colorize
             colors = mesh.metadata.pop('l3d_colors', None)
+            color_source = 'model' if colors is not None else 'photo'
             if colors is None:  # no colours from the model: project the photo(s) onto the mesh
                 progress('colouring', 1.0)
                 alpha = np.asarray(views.get('front', next(iter(views.values()))))[..., 3] / 255.0
@@ -116,7 +121,7 @@ def main():
             colorize.attach(mesh, colors)
         emit(ev='progress', id=jid, stage='saving', frac=1.0)
         mesh.export(base + '.glb')
-        emit(ev='done', id=jid, glb=base + '.glb', verts=len(mesh.vertices), faces=len(mesh.faces),
+        emit(ev='done', id=jid, glb=base + '.glb', inputs=inputs, color_source=color_source, verts=len(mesh.vertices), faces=len(mesh.faces),
              watertight=bool(mesh.is_watertight), seconds=round(time.time() - t, 1))
 
     for line in sys.stdin:

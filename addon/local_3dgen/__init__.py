@@ -210,7 +210,7 @@ def _tick():
             job, Engine.current = Engine.current, None
             Engine.batch_done += 1
             try:
-                name = _import_result(ev["glb"], job)
+                name = _import_result(ev["glb"], job, ev.get("inputs"), ev.get("color_source"))
                 info = f'{ev["verts"]:,} verts · {ev["seconds"]:.0f}s' + ("" if ev.get("watertight") else " · open mesh")
                 Engine.results.insert(0, (name, info))
                 del Engine.results[8:]
@@ -256,7 +256,7 @@ def _tick():
     return 0.25 if (Engine.alive() or Engine.pending or not Engine.events.empty()) else None
 
 
-def _import_result(glb, job):
+def _import_result(glb, job, inputs=None, color_source=None):
     from mathutils import Matrix, Vector
     ctx = job["ctx"]
     scene = bpy.data.scenes.get(ctx["scene"]) or bpy.context.scene
@@ -290,6 +290,10 @@ def _import_result(glb, job):
     ob["l3d_seed"] = job["seed"]
     ob["l3d_images"] = json.dumps(job["req"].get("views") or {"front": job["req"]["image"]})
     ob["l3d_glb"] = glb
+    if inputs:
+        ob["l3d_inputs"] = json.dumps(inputs)  # cut-out photos, used for AMS colour regions
+    if color_source:
+        ob["l3d_color_source"] = color_source  # 'model': vertex colours line up with the geometry
     coll = bpy.data.collections.get("AI Meshes") or bpy.data.collections.new("AI Meshes")
     if coll.name not in scene.collection.children:
         scene.collection.children.link(coll)
@@ -428,9 +432,10 @@ class L3D_Props(bpy.types.PropertyGroup):
     tr_steps: IntProperty(name="Steps", default=12, min=4, max=50, description="Per stage (structure, detail)")
     tr_guidance: FloatProperty(name="Guidance", default=7.5, min=1.0, max=15.0,
                                description="How strictly the overall shape follows the image")
-    tr_colors: EnumProperty(name="Colours", default='photo', items=[
-        ('photo', "From photo", "Project the photo(s) onto the model; unseen sides mirror the photo"),
-        ('model', "TRELLIS's own", "Colours TRELLIS generates itself: covers every side, may invent")])
+    tr_colors: EnumProperty(name="Colours", default='model', items=[
+        ('model', "TRELLIS's own", "Generated with the shape, so they line up with the geometry. Unseen "
+                                   "sides are guessed (use AMS Mirror for symmetric objects)"),
+        ('photo', "From photo", "Project the photo(s) onto the model")])
     # common
     seed: IntProperty(name="Seed", default=1234, min=0)
     random_seed: BoolProperty(name="Random", default=True, description="New random seed each run")
