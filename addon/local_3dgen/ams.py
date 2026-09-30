@@ -12,7 +12,7 @@ import zipfile
 
 import bpy
 import numpy as np
-from bpy.props import (CollectionProperty, EnumProperty, FloatProperty, FloatVectorProperty,
+from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, FloatProperty, FloatVectorProperty,
                        IntProperty, PointerProperty, StringProperty)
 
 MAT_PREFIX = "AMS "
@@ -442,6 +442,14 @@ class L3D_AMSProps(bpy.types.PropertyGroup):
     border_mm: FloatProperty(name="Border smoothing (mm)", default=1.2, min=0.0, soft_max=6.0,
                              description="How far colour borders are smoothed along the surface: removes the "
                                          "triangle staircase and hair-thin slivers (0 = off)")
+    follow_shape: BoolProperty(name="Follow the shape", default=True,
+                               description="Make colour borders sit on the shape's creases and seams (rib edges, "
+                                           "rims, where parts meet), and vote out smudges inside each patch")
+    crease: FloatProperty(name="Crease strength", default=1.0, min=0.1, soft_max=5.0,
+                          description="How strongly creases and concave seams separate colour patches")
+    patch_mm2: FloatProperty(name="Patch size (mm²)", default=8.0, min=1.0, soft_max=500.0,
+                             description="Bigger = fewer, cleaner patches (smudges vanish); smaller = keeps small "
+                                         "colour details that don't follow the shape")
     rim_slot: IntProperty(name="Rim colour", default=2, min=1, max=16,
                           description="Slot of the part the holes are cut into (e.g. the white shell)")
     through_slot: IntProperty(name="Seen-through colour", default=1, min=1, max=16,
@@ -631,7 +639,10 @@ class L3D_OT_ams_assign(bpy.types.Operator):
                 ar = np.empty(len(me.polygons)); me.polygons.foreach_get('area', ar)
                 labels = merge_small_regions(labels, a, b, ar * scale ** 2, k, p.min_area)
                 labels = majority_smooth(labels, a, b, k, 1)
-        if p.border_mm > 0:
+        if p.follow_shape:  # borders snap to the shape's creases; smudges inside a patch are voted out
+            from . import shape_regions
+            labels, _ = shape_regions.follow_shape(context, ob, labels, k, p.crease, p.patch_mm2, p.min_area)
+        elif p.border_mm > 0:  # (diffusion smoothing would pull shape-following borders off the creases)
             labels = smooth_borders(context, ob, labels, k, p.border_mm, p.border_levels)
             me = ob.data
         mm, mw = world_scale_mm(context, ob)
@@ -870,8 +881,14 @@ class L3D_PT_ams(bpy.types.Panel):
             row.operator("l3d.ams_paint", icon='BRUSHES_ALL')
         L.prop(p, "regions")
         L.prop(p, "target_faces")
-        L.prop(p, "border_mm")
-        L.prop(p, "border_levels")
+        L.prop(p, "follow_shape")
+        if p.follow_shape:
+            r = L.row(align=True)
+            r.prop(p, "crease")
+            r.prop(p, "patch_mm2", text="Patch")
+        else:
+            L.prop(p, "border_mm")
+            L.prop(p, "border_levels")
         L.prop(p, "mirror", text="")
         L.prop(p, "min_area")
         L.prop(p, "smooth")
