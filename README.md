@@ -37,6 +37,11 @@ Downloaded automatically as dependencies:
 - [DINOv2](https://github.com/facebookresearch/dinov2), used by TRELLIS.
 - [U²-Net](https://github.com/xuebinqin/U-2-Net), for background removal through [rembg](https://github.com/danielgatis/rembg).
 
+Optional, for clean AMS colours: **Hunyuan3D-Paint** (the weights are
+[tencent/Hunyuan3D-2](https://huggingface.co/tencent/Hunyuan3D-2): `hunyuan3d-delight-v2-0` and
+`hunyuan3d-paint-v2-0-turbo`, about 12 GB of GPU memory). It removes lighting and shadows from your photo, then
+paints the model from several angles.
+
 TRELLIS.2 is not supported: it currently needs Linux and 24 GB or more of GPU memory.
 
 ## Requirements
@@ -56,6 +61,9 @@ TRELLIS.2 is not supported: it currently needs Linux and 24 GB or more of GPU me
    powershell -ExecutionPolicy Bypass -File setup\setup_trellis.ps1      # -> %USERPROFILE%\TRELLIS
    ```
    Pass `-Dir D:\somewhere` to install elsewhere.
+   For clean AMS colours, also install [CUDA Toolkit 12.8](https://developer.nvidia.com/cuda-12-8-1-download-archive)
+   (`winget install --id Nvidia.CUDA --version 12.8`) and Visual Studio 2022 Build Tools (C++), then run
+   `setup\setup_paint.ps1`, which compiles Hunyuan3D-Paint's GPU rasterizer.
 2. Install the Blender add-on. Pick one option:
    - **Link it**, so it updates with `git pull`:
      ```powershell
@@ -89,20 +97,22 @@ Tips:
 
 Similar to Meshy's multi-colour print, but local. Select a generated model and open **Image to 3D > AMS colours**:
 
-1. Set **Colours** (the number of filaments), then click the eyedropper. The palette is taken from the source
+1. Optional but recommended: **Clean colours (Hunyuan3D-Paint)**. It repaints the model with the lighting and
+   shadows removed, in about 90 s, and replaces it with a painted copy. Without this, shadows in the photo or
+   model turn into dark patches.
+2. Set **Colours** (the number of filaments), then click the eyedropper. The palette is taken from the source
    photo(s), so the colours are clean, not the shaded ones on the mesh. You can edit any swatch.
-2. **Regions from**: *Auto* uses the model's own colours when it generated them (TRELLIS; they line up exactly
+3. **Regions from**: *Auto* uses the model's own colours when it generated them (TRELLIS; they line up exactly
    with the geometry), and otherwise flattens the photos into regions and projects them. When projecting, the
    camera angle of the photo is matched automatically.
-3. **Mirror**: for symmetric pieces like pots and vases, copy the front's colours onto the back, since the back
+4. **Mirror**: for symmetric pieces like pots and vases, copy the front's colours onto the back, since the back
    is guessed.
-4. **Assign colours**. Specks smaller than *Smallest patch* are merged away and borders are smoothed. Touch up
+5. **Assign colours**. Specks smaller than *Smallest patch* are merged, and borders are smoothed over
+   *Border smoothing* mm and subdivided so they can run between triangle edges. Touch up
    by hand if needed: Edit Mode, select faces, then *Material > Assign*.
-5. **Export 3MF**: one solid object with per-triangle colour painting, which is Bambu Studio's and
-   PrusaSlicer's multi-colour format. Load it with *File > Import*, and set the filaments in the order of the
-   slots (the hex colours are listed in `Metadata/ams_colours.txt` inside the 3MF).
-
-Status: the colour regions work well, but loading the 3MF in Bambu Studio / OrcaSlicer hasn't been verified yet.
+6. **Export 3MF**: a Bambu Studio project with per-triangle colour painting, using the same layout as Meshy's
+   multi-colour export. The chosen printer and one PLA filament per palette colour are preset. Load it with
+   *File > Import > Import 3D Models*.
 
 ## Command line
 
@@ -119,6 +129,7 @@ Blender add-on (addon/local_3dgen)
    └─ starts engine/server.py with the chosen model's own .venv Python
         ├─ backends/hunyuan.py     → Hunyuan3D-2.1 (hy3dshape)
         ├─ backends/hunyuan_mv.py  → Hunyuan3D-2mv (hy3dgen)
+        ├─ backends/hunyuan_paint.py → Hunyuan3D-Paint: repaints an existing mesh (the "paint" request)
         └─ backends/trellis.py     → TRELLIS, single or multi-image (+ shims for xformers / kaolin)
    JSON lines over stdin/stdout: generate requests in; progress, done and error events out
 ```

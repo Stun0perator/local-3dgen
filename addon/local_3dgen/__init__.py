@@ -42,6 +42,14 @@ MODELS = {
         about="Fast (~10 s). Accepts several views of any angle. ~8 GB GPU memory",
         multiview=True, pref="trellis_dir"),
 }
+# painting backend (not a shape model; used by AMS > Clean colours)
+MODELS['hunyuan_paint'] = dict(
+    label="Hunyuan3D-Paint",
+    weights="https://huggingface.co/tencent/Hunyuan3D-2",
+    code="https://github.com/Tencent-Hunyuan/Hunyuan3D-2",
+    license="Tencent Hunyuan 3D 2.0 Community License (not valid in the EU, UK, South Korea)",
+    about="Paints clean, de-lit colours onto a model from its photo(s)",
+    multiview=True, pref="hunyuan_mv_dir")
 VIEWS = [('front', "Front", ""), ('left', "Left", ""), ('back', "Back", ""), ('right', "Right", "")]
 
 _previews = None
@@ -285,7 +293,12 @@ def _import_result(glb, job, inputs=None, color_source=None):
     ob.location = Vector(ctx["cursor"]) + Vector((job["slot"] * ctx["size_bu"] * 1.25, 0, 0))
     for poly in ob.data.polygons:
         poly.use_smooth = ctx["smooth"]
-    ob.name = ob.data.name = f'{job["name"]}_{job["backend"]}_s{job["seed"]}'
+    ob.name = ob.data.name = job.get("obname") or f'{job["name"]}_{job["backend"]}_s{job["seed"]}'
+    if job.get("replaces") and bpy.data.objects.get(job["replaces"]):
+        old = bpy.data.objects[job["replaces"]]
+        ob.location = old.location.copy()
+        old.hide_set(True)
+        old.hide_render = True
     ob["l3d_model"] = MODELS[job["backend"]]["label"]
     ob["l3d_seed"] = job["seed"]
     ob["l3d_images"] = json.dumps(job["req"].get("views") or {"front": job["req"]["image"]})
@@ -755,7 +768,8 @@ class L3D_PT_panel(bpy.types.Panel):
                 L.progress(factor=0.0, type='BAR', text=f"Loading model…{n}")
             else:
                 secs = int(time.time() - Engine.stage_at)
-                if Engine.stage in ("building mesh", "cleaning up", "saving", "removing background", "starting"):
+                if Engine.stage in ("building mesh", "cleaning up", "saving", "removing background", "starting",
+                                    "preparing mesh", "painting", "transferring colours", "colouring"):
                     text = f"{Engine.stage.capitalize()}... {secs}s{n}"   # no step count for these stages
                 else:
                     text = f"{Engine.stage.capitalize()} {int(Engine.frac * 100)}%{n}"
