@@ -28,8 +28,7 @@ class Backend:
         self.reduce = FaceReducer()
         self._cls = Hunyuan3DPaintPipeline
         self.quality = None
-        self.pipe = None
-        self._load('turbo')
+        self.pipe = None  # loaded by the first paint request, in the quality it asks for
 
     def _load(self, quality):
         """One paint model in GPU memory at a time; switching quality reloads."""
